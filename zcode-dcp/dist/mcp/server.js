@@ -1,15 +1,18 @@
 #!/usr/bin/env node
 /**
- * ZCode DCP v0.2.0 MCP Server (dependency-free)
+ * ZCode DCP v0.3.0 MCP Server (dependency-free)
  *
  * 工具:
- *  compress      归档不再需要的对话内容为摘要（注意：归档不减少当前 token，真正释放发生在 ZCode 内置 compact）
- *  decompress    查看已归档块
- *  context_stats 归档统计 + 真实上下文占用（由 hook 写入的 usage.json）
- *  sweep         去重/错误清理建议
- *  context_usage 当前真实上下文占用
+ *  compress        归档不再需要的对话内容为摘要（描述内嵌承重提示词，改写自 acp-kernel MIT）
+ *  decompress      查看已归档块
+ *  search_context  按关键词检索归档块（中英文，多词交集）
+ *  context_stats   归档统计 + 真实上下文占用（hook 写入的 usage.json）
+ *  context_usage   当前真实上下文占用
+ *  sweep           去重/错误清理建议
  *
  * 协议: MCP stdio（按行分隔的 JSON-RPC 2.0），无第三方依赖。
+ * 持久化: 归档块存 ~/.zcode/dcp/blocks.json（启动加载、compress 后写盘、写失败静默降级为内存）。
+ * 提示词出处: 承重规则 adapted from acp-kernel (MIT, @ranxianglei)。
  */
 "use strict";
 
@@ -17,16 +20,42 @@ const fs = require("fs");
 const path = require("path");
 const os = require("os");
 
-const SERVER_INFO = { name: "zcode-dcp", version: "0.2.0" };
+const SERVER_INFO = { name: "zcode-dcp", version: "0.3.0" };
 const STATE_DIR = path.join(os.homedir(), ".zcode", "dcp");
 const USAGE_FILE = path.join(STATE_DIR, "usage.json");
+const BLOCKS_FILE = path.join(STATE_DIR, "blocks.json");
 
-// ---------- 状态（进程内存，会话内有效） ----------
+// ---------- 状态（启动时从 blocks.json 加载） ----------
 const state = {
   blocks: [],
   nextBlockId: 1,
   stats: { totalCompressions: 0, totalDecompressions: 0, lastCompressionAt: null },
 };
+
+function loadBlocks() {
+  try {
+    if (!fs.existsSync(BLOCKS_FILE)) return;
+    const raw = JSON.parse(fs.readFileSync(BLOCKS_FILE, "utf-8"));
+    if (Array.isArray(raw.blocks)) {
+      state.blocks = raw.blocks.filter((b) => b && b.blockId);
+      state.nextBlockId =
+        Number.isFinite(raw.nextBlockId) && raw.nextBlockId > 0
+          ? raw.nextBlockId
+          : state.blocks.reduce((m, b) => Math.max(m, parseInt(String(b.blockId).slice(1), 10) || 0), 0) + 1;
+    }
+  } catch {}
+}
+
+function saveBlocks() {
+  try {
+    fs.mkdirSync(STATE_DIR, { recursive: true });
+    fs.writeFileSync(
+      BLOCKS_FILE,
+      JSON.stringify({ blocks: state.blocks, nextBlockId: state.nextBlockId, savedAt: new Date().toISOString() }, null, 2),
+      "utf-8"
+    );
+  } catch {} // 写失败静默：保留内存可用（spec: 无害降级）
+}
 
 function formatBlockId(n) {
   return "b" + String(n).padStart(3, "0");
@@ -69,25 +98,38 @@ function usagePayload() {
     contextWindowTokens: u.contextWindowTokens,
     usedPercent: u.usedPercent,
     nudgeThresholdPercent: u.thresholdPercent,
+    tier2Percent: u.tier2Percent,
+    tier3Percent: u.tier3Percent,
     totalTokens: u.totalTokens ?? undefined,
     sessionId: u.sessionId,
     updatedAt: u.updatedAt,
     ageMinutes: Number.isFinite(ageMin) ? ageMin : undefined,
+    baselineNote:
+      "占用百分比相对插件配置的上下文窗口基准（contextWindowTokens，默认 1,000,000）；请按所用模型实际窗口在插件设置中调整。",
     note: "usedTokens 来自 ZCode 模型 IO 日志的 usage.inputTokens（含缓存读取），是下一轮请求的真实输入规模。",
   };
 }
 
-// ---------- 工具实现 ----------
+// ---------- 工具 ----------
+const COMPRESS_DESCRIPTION = [
+  "归档不再需要的对话内容为摘要。压缩优先级：子代理审查结果 → 冗长命令输出(build/test/diff) → 走不通的探索 → 重复工具调用 → 已完成中间步骤 → 已解决讨论 → 已用完的大文件内容。按需压缩、不按百分比。",
+  "",
+  "摘要将成为该范围的唯一记录，必须自包含：标注 TASK AS OF THIS BLOCK（历史记录，非现行指令）；未完成的目标逐条写入 'Open objectives: <目标>'；禁止伪造用户原话——引用须注明出处阶段/主题，记不清就转述；保持源会话主语言。",
+  "",
+  "KEEP VERBATIM（逐字保留，禁止改写缩写）：完整文件路径+行号（带目录前缀，如 lib/hooks.ts:347，禁止缩写裸文件名）；函数/类签名与承载结论的关键代码行；报错原文与堆栈（留字面量供日后检索）；数值+机制（'1.76× PPL 差距，因 KV store 静态'，而非'X 更差'）；决策及其 because；发现的约束；精确值（版本/配置键/阈值/魔法数字）。",
+  "",
+  "注意：归档不减少当前上下文 token；真正释放发生在 ZCode 内置 compact（或用户 /compact）。",
+].join("\n");
+
 const tools = [
   {
     name: "compress",
-    description:
-      "归档不再需要的对话内容为摘要（旧的搜索/探索结果、已完成的调试过程、重复的工具调用、已解决的错误）。注意：归档本身不减少当前上下文 token，它保证信息不丢；真正释放发生在 ZCode 内置 compact（约 83% 自动触发，或用户执行 /compact）。",
+    description: COMPRESS_DESCRIPTION,
     inputSchema: {
       type: "object",
       properties: {
         topic: { type: "string", description: "压缩范围的描述，如 '之前的文件搜索操作'" },
-        summary: { type: "string", description: "压缩摘要，保留所有关键信息以便后续参考" },
+        summary: { type: "string", description: "压缩摘要，按 KEEP VERBATIM 规则保留承重信息以便后续检索" },
         tags: { type: "array", items: { type: "string" }, description: "可选标签，如 ['api','debug']" },
         type: {
           type: "string",
@@ -112,10 +154,11 @@ const tools = [
       state.nextBlockId += 1;
       state.stats.totalCompressions += 1;
       state.stats.lastCompressionAt = block.createdAt;
+      saveBlocks();
       return {
         blockId,
         topic: block.topic,
-        message: `已归档: ${block.topic} (块 ID: ${blockId})。后续可用 context_stats 查看、decompress 回顾。归档不减少当前 token；要立即释放上下文请建议用户执行 /compact。`,
+        message: `已归档: ${block.topic} (块 ID: ${blockId})。已持久化，跨会话可用 search_context 检索、decompress 取回。归档不减少当前 token；要立即释放上下文请建议用户执行 /compact。`,
       };
     },
   },
@@ -144,6 +187,62 @@ const tools = [
         type: block.type,
         createdAt: formatLocalTime(block.createdAt),
         message: `已解压块 ${block.blockId}: ${block.topic}`,
+      };
+    },
+  },
+  {
+    name: "search_context",
+    description:
+      "按关键词检索已归档的压缩块（匹配 topic/tags/summary，大小写不敏感，多关键词取交集，中英文均可），返回块 ID、主题与命中片段；配合 decompress 取回完整摘要。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "检索关键词，多个词用空格分隔（取交集）" },
+        limit: { type: "number", description: "返回上限，默认 5" },
+      },
+      required: ["query"],
+    },
+    handler(args) {
+      const query = String(args.query || "").trim();
+      if (!query) {
+        return { query, results: [], message: "查询词为空，无命中。" };
+      }
+      const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+      const limit = Math.max(1, Math.min(50, Number.isFinite(+args.limit) ? +args.limit : 5));
+      const scored = [];
+      for (const b of state.blocks) {
+        if (!b.active) continue;
+        const topic = String(b.topic || "");
+        const tags = Array.isArray(b.tags) ? b.tags.join(" ") : "";
+        const summary = String(b.summary || "");
+        let score = 0;
+        let allMatch = true;
+        for (const term of terms) {
+          const c = (topic.toLowerCase().split(term).length - 1) + (tags.toLowerCase().split(term).length - 1) + (summary.toLowerCase().split(term).length - 1);
+          if (c === 0) {
+            allMatch = false;
+            break;
+          }
+          score += c;
+        }
+        if (allMatch && score > 0) {
+          const hay = summary || topic;
+          const pos = hay.toLowerCase().indexOf(terms[0]);
+          const start = Math.max(0, pos - 60);
+          const snippet = (start > 0 ? "…" : "") + hay.slice(start, start + 140) + (start + 140 < hay.length ? "…" : "");
+          scored.push({ blockId: b.blockId, topic, type: b.type, createdAt: formatLocalTime(b.createdAt), score, snippet });
+        }
+      }
+      scored.sort((a, b2) => b2.score - a.score || String(b2.createdAt).localeCompare(String(a.createdAt)));
+      const results = scored.slice(0, limit).map(({ score, ...r }) => r);
+      return {
+        query,
+        total: scored.length,
+        results,
+        message:
+          scored.length === 0
+            ? `无命中：没有同时包含全部关键词（${query}）的归档块。`
+            : `命中 ${scored.length} 块${scored.length > results.length ? `（显示前 ${results.length} 条）` : ""}，用 decompress 取回完整摘要。`,
       };
     },
   },
@@ -197,20 +296,16 @@ const tools = [
       const cfgAutoSweep = String(process.env.DCP_AUTO_SWEEP || "true") !== "false";
       const suggestions = [];
       if (cfgAutoSweep) {
-        suggestions.push(
-          "【auto_sweep】自动清理已开启：每次压缩前建议先执行去重与错误清理扫描。"
-        );
+        suggestions.push("【auto_sweep】自动清理已开启：每次压缩前建议先执行去重与错误清理扫描。");
       }
       if (args.action === "deduplicate" || args.action === "all") {
         suggestions.push(
-          "【去重建议】检查对话中是否有相同工具+相同参数的重复调用。如有，只保留最新一次，将之前的调用及其结果用 compress 工具归档。",
-          "示例：多次用相同参数调用 Read 或 Grep 时，可将旧的调用结果归档。"
+          "【去重建议】检查对话中是否有相同工具+相同参数的重复调用。如有，只保留最新一次，将之前的调用及其结果用 compress 工具归档。"
         );
       }
       if (args.action === "purge_errors" || args.action === "all") {
         suggestions.push(
-          "【错误清理建议】检查对话中是否有返回错误的工具调用。如错误已解决或不再相关，可将错误上下文用 compress 归档，只保留错误类型和解决方案。",
-          "示例：一个 Bash 命令报错后你已找到正确方法，可将旧的错误上下文归档。"
+          "【错误清理建议】检查对话中是否有返回错误的工具调用。如错误已解决或不再相关，可将错误上下文用 compress 归档，只保留错误类型和解决方案。"
         );
       }
       return {
@@ -239,7 +334,6 @@ function handleMessage(msg) {
   const method = msg.method || "";
 
   if (isNotification) {
-    // notifications/initialized, notifications/cancelled 等：忽略
     return;
   }
 
@@ -284,6 +378,7 @@ function handleMessage(msg) {
 }
 
 // ---------- 启动 ----------
+loadBlocks();
 let buf = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {
@@ -295,9 +390,7 @@ process.stdin.on("data", (chunk) => {
     if (!line) continue;
     try {
       handleMessage(JSON.parse(line));
-    } catch {
-      // 无法解析的行：忽略，保持服务存活
-    }
+    } catch {}
   }
 });
 process.stdin.on("end", () => process.exit(0));

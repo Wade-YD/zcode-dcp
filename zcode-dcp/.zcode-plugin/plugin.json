@@ -1,7 +1,7 @@
 {
   "name": "zcode-dcp",
-  "version": "0.2.2",
-  "description": "Dynamic Context Pruning v2 - 真实计量上下文占用，达到阈值自动注入压缩提醒，归档不再需要的对话内容",
+  "version": "0.3.0",
+  "description": "Dynamic Context Pruning v3 - 真实计量上下文占用，三级阈值自动注入压缩提醒（含承重提示词），归档内容持久化并可检索",
   "author": {
     "name": "ZCode DCP"
   },
@@ -38,9 +38,27 @@
     },
     "nudge_percent": {
       "type": "number",
-      "title": "自动提醒阈值（%）",
-      "description": "上下文占用百分比达到此值时，自动注入压缩提醒（每轮开始时计量）",
+      "title": "tier1 提醒阈值（%）",
+      "description": "占用达到此值时注入温和提醒（归档旧内容）",
       "default": 50
+    },
+    "tier2_percent": {
+      "type": "number",
+      "title": "tier2 强提醒阈值（%）",
+      "description": "占用达到此值时注入强提醒（停止冗长输出、就地小结、立即归档）",
+      "default": 70
+    },
+    "tier3_percent": {
+      "type": "number",
+      "title": "tier3 升级阈值（%）",
+      "description": "占用达到此值时建议执行 /compact 并要求模型先写交接摘要",
+      "default": 80
+    },
+    "nudge_growth_tokens": {
+      "type": "number",
+      "title": "同级重复提醒的增长步进（tokens）",
+      "description": "同层级提醒重复注入需同时满足：冷却时间已过 且 占用增长达到此步进，避免打扰稳定会话",
+      "default": 30000
     },
     "nudge_cooldown_minutes": {
       "type": "number",

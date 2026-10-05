@@ -4,16 +4,16 @@
     {
       "name": "zcode-dcp",
       "source": "./zcode-dcp",
-      "version": "0.2.2",
-      "description": "Dynamic Context Pruning for ZCode - real context usage metering, threshold-based auto compression nudges, and content archiving",
+      "version": "0.3.0",
+      "description": "Dynamic Context Pruning for ZCode - real context metering, tiered compression nudges (50/70/80%), searchable persistent archive",
       "displayName": "DCP Dynamic Context Pruning",
       "displayName_i18n": {
         "zh-CN": "DCP 动态上下文压缩",
         "en": "DCP Dynamic Context Pruning"
       },
       "description_i18n": {
-        "zh-CN": "真实计量上下文占用，达到阈值自动提醒压缩，归档不再需要的对话内容",
-        "en": "Real context usage metering, threshold-based auto compression nudges, and archiving of stale conversation content"
+        "zh-CN": "真实计量上下文占用，三级阈值自动提醒压缩（含承重提示词），归档持久化并可检索",
+        "en": "Real context usage metering, tiered auto compression nudges, searchable persistent archive"
       },
       "category": "productivity"
     }
