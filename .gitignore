@@ -1,0 +1,5 @@
+# session-scoped artifacts written by other plugins / tools
+.mimosa/
+*.log
+.DS_Store
+node_modules/

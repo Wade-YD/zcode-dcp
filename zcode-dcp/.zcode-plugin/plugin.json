@@ -1,0 +1,76 @@
+{
+  "name": "zcode-dcp",
+  "version": "0.2.1",
+  "description": "Dynamic Context Pruning v2 - 真实计量上下文占用，达到阈值自动注入压缩提醒，归档不再需要的对话内容",
+  "author": {
+    "name": "ZCode DCP"
+  },
+  "license": "MIT",
+  "skills": "skills",
+  "commands": "commands",
+  "hooks": "hooks",
+  "mcpServers": {
+    "dcp": {
+      "command": "node",
+      "args": [
+        "${ZCODE_PLUGIN_ROOT}/dist/mcp/server.js"
+      ],
+      "cwd": "${ZCODE_PROJECT_DIR}",
+      "env": {
+        "DCP_PLUGIN_ROOT": "${ZCODE_PLUGIN_ROOT}",
+        "DCP_PROJECT_DIR": "${ZCODE_PROJECT_DIR}",
+        "DCP_MAX_CONTEXT_TOKENS": "${user_config.max_context_tokens}",
+        "DCP_NUDGE_THRESHOLD": "${user_config.nudge_threshold}",
+        "DCP_AUTO_SWEEP": "${user_config.auto_sweep}",
+        "DCP_CONTEXT_WINDOW_TOKENS": "${user_config.context_window_tokens}",
+        "DCP_NUDGE_PERCENT": "${user_config.nudge_percent}",
+        "DCP_NUDGE_COOLDOWN_MINUTES": "${user_config.nudge_cooldown_minutes}",
+        "DCP_AUTO_WATCH": "${user_config.auto_watch}"
+      }
+    }
+  },
+  "userConfig": {
+    "context_window_tokens": {
+      "type": "number",
+      "title": "模型上下文窗口（tokens）",
+      "description": "当前模型的上下文窗口大小，用于计算占用百分比。默认 200000，按实际模型调整",
+      "default": 200000
+    },
+    "nudge_percent": {
+      "type": "number",
+      "title": "自动提醒阈值（%）",
+      "description": "上下文占用百分比达到此值时，自动注入压缩提醒（每轮开始时计量）",
+      "default": 50
+    },
+    "nudge_cooldown_minutes": {
+      "type": "number",
+      "title": "提醒冷却（分钟）",
+      "description": "两次自动压缩提醒之间的最小间隔，避免重复打扰",
+      "default": 10
+    },
+    "auto_watch": {
+      "type": "boolean",
+      "title": "启用自动计量",
+      "description": "每轮读取 ZCode 模型 IO 日志计量真实 token 占用，达到阈值时自动提醒压缩",
+      "default": true
+    },
+    "max_context_tokens": {
+      "type": "number",
+      "title": "旧版：最大上下文 token 数",
+      "description": "v0.1 兼容字段，仅用于统计展示",
+      "default": 100000
+    },
+    "nudge_threshold": {
+      "type": "number",
+      "title": "旧版：提醒阈值百分比",
+      "description": "v0.1 兼容字段，请改用 nudge_percent",
+      "default": 50
+    },
+    "auto_sweep": {
+      "type": "boolean",
+      "title": "自动清理建议",
+      "description": "压缩时附带去重与错误清理建议",
+      "default": true
+    }
+  }
+}

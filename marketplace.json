@@ -1,0 +1,21 @@
+{
+  "name": "zcode-dcp-market",
+  "plugins": [
+    {
+      "name": "zcode-dcp",
+      "source": "./zcode-dcp",
+      "version": "0.2.1",
+      "description": "Dynamic Context Pruning for ZCode - real context usage metering, threshold-based auto compression nudges, and content archiving",
+      "displayName": "DCP Dynamic Context Pruning",
+      "displayName_i18n": {
+        "zh-CN": "DCP 动态上下文压缩",
+        "en": "DCP Dynamic Context Pruning"
+      },
+      "description_i18n": {
+        "zh-CN": "真实计量上下文占用，达到阈值自动提醒压缩，归档不再需要的对话内容",
+        "en": "Real context usage metering, threshold-based auto compression nudges, and archiving of stale conversation content"
+      },
+      "category": "productivity"
+    }
+  ]
+}

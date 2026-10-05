@@ -1,0 +1,6 @@
+{
+  "name": "zcode-dcp",
+  "version": "0.2.1",
+  "private": true,
+  "description": "Dynamic Context Pruning v2 for ZCode - 真实计量上下文占用，达阈值自动提醒，归档旧内容"
+}
