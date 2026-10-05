@@ -4,7 +4,7 @@
     {
       "name": "zcode-dcp",
       "source": "./zcode-dcp",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "description": "Dynamic Context Pruning for ZCode - real context usage metering, threshold-based auto compression nudges, and content archiving",
       "displayName": "DCP Dynamic Context Pruning",
       "displayName_i18n": {

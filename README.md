@@ -46,7 +46,7 @@ ZCode DCP 是一个 [ZCode](https://zcode.ai) 插件，用于**动态管理对�
 | 配置项 | 默认 | 说明 |
 |---|---|---|
 | `nudge_percent` | 50 | 自动提醒阈值（占用百分比）。嫌提醒频繁可调到 60–70 |
-| `context_window_tokens` | 200000 | 当前模型的上下文窗口。改准了百分比才算得对 |
+| `context_window_tokens` | 1000000 | 当前模型的上下文窗口。改准了百分比才算得对（GLM-5.3-Flash 实测约 968K） |
 | `nudge_cooldown_minutes` | 10 | 两次自动提醒的最小间隔 |
 | `auto_watch` | true | 关闭后回到纯手动模式 |
 

@@ -26,7 +26,7 @@ const NUDGE_FILE = path.join(STATE_DIR, "nudge.json");
 const ROLLOUT_DIR = path.join(HOME, ".zcode", "cli", "rollout");
 
 const DEFAULTS = {
-  context_window_tokens: 200000,
+  context_window_tokens: 1000000,
   nudge_percent: 50,
   nudge_cooldown_minutes: 10,
   auto_watch: true,
