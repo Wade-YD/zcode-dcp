@@ -29,4 +29,4 @@
 ## 6. 交付
 
 - [x] 6.1 `README.md`：更新配置表（4 个新配置项 + 1M 默认）、提示词出处致谢（adapted from acp-kernel, MIT, @ranxianglei）、post-compact-recap 实测结论；同步 `marketplace.json` 版本。验证：README 渲染检查、版本三处一致（plugin.json/marketplace.json/README）
-- [ ] 6.2 全量冒烟：MCP 握手 + tools/list（6 个工具）+ compress/decompress/search_context/context_usage/sweep 各调用一遍；按发布链同步源码目录 → GitHub 仓库副本 → commit/push。验证：远端 main 包含全部改动且版本一致
+- [x] 6.2 全量冒烟：MCP 握手 + tools/list（6 个工具）+ compress/decompress/search_context/context_usage/sweep 各调用一遍；按发布链同步源码目录 → GitHub 仓库副本 → commit/push。验证：远端 main 包含全部改动且版本一致
