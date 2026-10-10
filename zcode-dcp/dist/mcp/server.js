@@ -26,7 +26,7 @@ const {
   eachPluginOption,
 } = require("../dcp-common.cjs"); // 相对本文件：dist/mcp → dist/dcp-common.cjs
 
-const SERVER_INFO = { name: "zcode-dcp", version: "0.5.0" };
+const SERVER_INFO = { name: "zcode-dcp", version: "0.5.1" };
 const PROJECT_DIR = String(process.env.DCP_PROJECT_DIR || "");
 
 // ---------- 配置（env > config.json > 默认，遍历与过滤规则在 dcp-common） ----------

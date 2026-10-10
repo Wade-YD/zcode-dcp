@@ -178,7 +178,7 @@ reset();
 // ---------- T6 版本与 JSON 健全 ----------
 {
   const p = JSON.parse(fs.readFileSync(path.join(SRC, ".zcode-plugin", "plugin.json"), "utf-8"));
-  check("T6 版本 0.5.0 + 配置齐全", p.version === "0.5.0" && !!p.userConfig.archive_scope && !!p.userConfig.max_blocks && !!p.userConfig.absorb_min_tool_tokens);
+  check("T6 版本 0.5.1 + 配置齐全", p.version === "0.5.1" && !!p.userConfig.archive_scope && !!p.userConfig.max_blocks && !!p.userConfig.absorb_min_tool_tokens);
   const h = JSON.parse(fs.readFileSync(path.join(SRC, "hooks", "hooks.json"), "utf-8"));
   check("T6 PostToolUse 已注册", !!h.hooks.PostToolUse);
 }

@@ -64,7 +64,7 @@ const read = (f) => JSON.parse(fs.readFileSync(f, "utf-8"));
 {
   const p = JSON.parse(fs.readFileSync(path.join(SRC, ".zcode-plugin", "plugin.json"), "utf-8"));
   const cfg = p.userConfig;
-  check("T1 版本 0.5.0", p.version === "0.5.0");
+  check("T1 版本 0.5.1", p.version === "0.5.1");
   check("T1 窗口默认 1M", cfg.context_window_tokens.default === 1000000);
   check("T1 分级配置齐全", cfg.tier2_percent.default === 70 && cfg.tier3_percent.default === 80 && cfg.nudge_growth_tokens.default === 30000);
   check("T1 v0.1 遗留配置已删", !cfg.max_context_tokens && !cfg.nudge_threshold && !cfg.auto_sweep);

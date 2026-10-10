@@ -154,7 +154,7 @@ reset();
     encoding: "utf-8",
   });
   const ver = JSON.parse(sv.trim().split("\n")[0]).result.serverInfo.version;
-  check("T14 版本 0.5.0 一致", p.version === "0.5.0" && ver === "0.5.0");
+  check("T14 版本 0.5.1 一致", p.version === "0.5.1" && ver === "0.5.1");
 }
 
 console.log(`\n==== ${pass} passed, ${fail} failed ====`);

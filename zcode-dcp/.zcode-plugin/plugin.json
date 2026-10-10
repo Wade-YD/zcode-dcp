@@ -1,6 +1,6 @@
 {
   "name": "zcode-dcp",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "Dynamic Context Pruning v5 - 三级压缩提醒、压缩检测与窗口校准、会话隔离、按项目隔离的可检索归档与生命周期管理",
   "author": {
     "name": "ZCode DCP"
@@ -62,9 +62,8 @@
     },
     "archive_scope": {
       "type": "string",
-      "enum": ["project", "global"],
       "title": "归档作用域",
-      "description": "project=按项目目录隔离归档（推荐，防止项目间上下文漂移）；global=所有项目共享",
+      "description": "仅允许 project 或 global：project=按项目目录隔离归档（推荐，防止项目间上下文漂移）；global=所有项目共享",
       "default": "project"
     },
     "max_blocks": {

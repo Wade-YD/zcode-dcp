@@ -4,7 +4,7 @@
     {
       "name": "zcode-dcp",
       "source": "./zcode-dcp",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "description": "Dynamic Context Pruning v4 - tiered nudges, compact detection with window auto-calibration, session isolation, per-project searchable archive with lifecycle",
       "displayName": "DCP Dynamic Context Pruning",
       "displayName_i18n": {
