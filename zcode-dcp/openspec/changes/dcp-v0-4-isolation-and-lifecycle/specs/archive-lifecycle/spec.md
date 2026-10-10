@@ -22,12 +22,12 @@
 
 ### Requirement: 归档数量上限与蒸馏
 
-归档块数量超过 `max_blocks`（默认 200）时，插件 SHALL 把最旧的约 20% 块蒸馏合并为一个新块：分节保留各块 topic 与截断摘要（每节至多 800 字符），且各块中开放目标（Open objectives）行 SHALL 逐字保留。
+归档块数量超过 `max_blocks`（默认 200）时，插件 SHALL 蒸馏合并最旧的块直至总数回落到上限：合并块分节保留各块 topic 与截断摘要（每节至多 800 字符），且各块中开放目标（Open objectives）行 SHALL 逐字保留。
 
 #### Scenario: 超限触发蒸馏
 
 - **WHEN** max_blocks 为 5 且已有 5 块时再归档第 6 块
-- **THEN** 最旧的 1 块被蒸馏合并，总块数回落到 5
+- **THEN** 最旧的 2 块被蒸馏合并为一个新块，总块数回落到 5
 
 #### Scenario: 开放目标逐字保留
 

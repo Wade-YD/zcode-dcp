@@ -46,7 +46,9 @@ const DEFAULTS = {
   absorb_min_tool_tokens: 8000,
 };
 
-// ---------- 配置: env > config.json（任意包含 zcode-dcp 的插件选项） > 默认 ----------
+// ---------- 配置: env(仅手动设置) > config.json > 默认 ----------
+// 注意：plugin.json 的 env 模板只对 mcpServers 生效，hook 进程拿不到 user_config 的 env——
+// config.json（plugins.options 里含 "zcode-dcp" 的键）是 userConfig 到达 hook 的唯一正式通道。
 function loadConfig() {
   const cfg = { ...DEFAULTS, _windowExplicit: false };
   try {
@@ -119,7 +121,15 @@ function readJson(file) {
 function writeJson(file, obj) {
   try {
     fs.mkdirSync(STATE_DIR, { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(obj, null, 2), "utf-8");
+    const data = JSON.stringify(obj, null, 2);
+    const tmp = file + ".tmp";
+    fs.writeFileSync(tmp, data, "utf-8");
+    try {
+      fs.renameSync(tmp, file); // 原子替换，防写中程崩溃损坏状态文件
+    } catch {
+      fs.writeFileSync(file, data, "utf-8");
+      try { fs.rmSync(tmp, { force: true }); } catch {}
+    }
   } catch {}
 }
 
@@ -152,9 +162,18 @@ function effectiveWindow(cfg) {
 function sanitizeSid(sid) {
   return String(sid || "").replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 64) || "unknown";
 }
+function normalizeProjectDir(dir) {
+  if (!dir) return "";
+  let d = String(dir);
+  try { d = path.resolve(d); } catch {}
+  if (d.endsWith(path.sep) && d.length > 3) d = d.slice(0, -path.sep.length);
+  // 大小写/尾斜杠归一，防同项目被劈成两个命名空间
+  return process.platform === "win32" ? d.toLowerCase() : d;
+}
 function projectHash(projectDir) {
-  if (!projectDir) return "";
-  return crypto.createHash("sha256").update(String(projectDir)).digest("hex").slice(0, 12);
+  const d = normalizeProjectDir(projectDir);
+  if (!d) return "";
+  return crypto.createHash("sha256").update(d).digest("hex").slice(0, 12);
 }
 function blocksFileFor(projectDir, scope) {
   if (scope !== "project" || !projectDir) return path.join(STATE_DIR, "blocks.json");
@@ -170,6 +189,9 @@ function nudgeFileFor(sid) {
 }
 function absorbFileFor(sid) {
   return path.join(STATE_DIR, `absorb-${sanitizeSid(sid)}.json`);
+}
+function recallFileFor(sid) {
+  return path.join(STATE_DIR, `recall-pending-${sanitizeSid(sid)}.json`);
 }
 
 // ---------- 从模型 IO 日志读取最新 usage（严格会话匹配） ----------
@@ -255,9 +277,11 @@ function writeUsage(sessionId, eventName, used, total, cfg) {
   return { pct, win };
 }
 
-function detectCompact(sessionId, used, prevUsage) {
+function detectCompact(sessionId, used, prevUsage, cfg) {
   const prevUsed = prevUsage && Number.isFinite(prevUsage.usedTokens) ? prevUsage.usedTokens : null;
   if (!prevUsed || prevUsed < 20000) return null;
+  // 前值必须属于同一会话：跨会话的"骤降"只是切换了窗口，不是压缩（否则会伪造召回并污染窗口校准）
+  if (!prevUsage || prevUsage.sessionId !== (sessionId || null)) return null;
   if (used >= prevUsed * 0.6) return null;
   const event = {
     at: new Date().toISOString(),
@@ -271,7 +295,9 @@ function detectCompact(sessionId, used, prevUsage) {
   stats.events.push(event);
   stats.events = stats.events.slice(-20);
   writeJson(COMPACT_STATS_FILE, stats);
-  recordCalibration(prevUsed);
+  // 校准只采"窗口后 40% 区间"的压缩（符合内核触发点特征）；低水位压缩多为手动 /compact，会砸穿校准
+  const win = effectiveWindow(cfg);
+  if (prevUsed >= win.window * 0.6) recordCalibration(prevUsed);
   try {
     fs.rmSync(nudgeFileFor(sessionId), { force: true }); // 压缩后重置该会话提醒层级
   } catch {}
@@ -404,7 +430,12 @@ function maybeAbsorb(input, cfg, sessionId) {
       size = JSON.stringify(resp).length;
     } catch {}
   }
-  const tokens = Math.round(size / 4);
+  // CJK 每字≈1 token、ASCII 约 4 字符/token；纯 length/4 对中文低估 4 倍导致 absorb 几乎不触发
+  let cjk = 0;
+  try {
+    cjk = ((typeof resp === "string" ? resp : JSON.stringify(resp)).match(/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/g) || []).length;
+  } catch {}
+  const tokens = Math.round(cjk + (size - cjk) / 4);
   if (tokens < minTokens) return false;
   const af = absorbFileFor(sessionId);
   const prev = readJson(af);
@@ -436,7 +467,14 @@ function main(input, mode) {
   const projectDir = input.cwd || process.env.ZCODE_PROJECT_DIR || "";
 
   if (mode === "session-start") {
-    emitAdditionalContext(sessionStartText(projectDir, cfg.archive_scope));
+    let text = sessionStartText(projectDir, cfg.archive_scope);
+    const rf = recallFileFor(sessionId);
+    const pending = readJson(rf);
+    if (pending && pending.event) {
+      try { fs.rmSync(rf, { force: true }); } catch {}
+      text = buildCompactRecapText(pending.event, projectDir, cfg.archive_scope, cfg) + "\n\n" + text;
+    }
+    emitAdditionalContext(text);
     return;
   }
 
@@ -451,18 +489,29 @@ function main(input, mode) {
   if (!usage) return;
 
   const prevUsage = readJson(USAGE_FILE); // 必须在 writeUsage 覆写前取前值
-  const { pct } = writeUsage(sessionId, eventName, usage.usedTokens, usage.totalTokens, cfg);
+  writeUsage(sessionId, eventName, usage.usedTokens, usage.totalTokens, cfg);
 
-  // 骤降 → 压缩检出：prompt 模式即时召回，且不再叠加常规分级提醒
-  const compactEvent = detectCompact(sessionId, usage.usedTokens, prevUsage);
+  // 骤降 → 压缩检出：写召回标记；prompt 轮直接注入，stop 轮留给下一轮消费
+  const compactEvent = detectCompact(sessionId, usage.usedTokens, prevUsage, cfg);
   if (compactEvent) {
+    writeJson(recallFileFor(sessionId), { event: compactEvent });
     if (mode === "prompt") {
+      try { fs.rmSync(recallFileFor(sessionId), { force: true }); } catch {}
       emitAdditionalContext(buildCompactRecapText(compactEvent, projectDir, cfg.archive_scope, cfg));
     }
     return;
   }
 
   if (mode !== "prompt") return; // stop：只计量
+
+  // 上一轮（多为 stop）检出的压缩：本轮注入召回并清除标记，不再叠加常规提醒
+  const rf = recallFileFor(sessionId);
+  const pending = readJson(rf);
+  if (pending && pending.event) {
+    try { fs.rmSync(rf, { force: true }); } catch {}
+    emitAdditionalContext(buildCompactRecapText(pending.event, projectDir, cfg.archive_scope, cfg));
+    return;
+  }
 
   const win = effectiveWindow(cfg);
   const pctOfWin = Math.min(100, (usage.usedTokens / win.window) * 100);

@@ -21,7 +21,7 @@ const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
 
-const SERVER_INFO = { name: "zcode-dcp", version: "0.4.0" };
+const SERVER_INFO = { name: "zcode-dcp", version: "0.4.1" };
 const HOME = os.homedir();
 const STATE_DIR = path.join(HOME, ".zcode", "dcp");
 const USAGE_FILE = path.join(STATE_DIR, "usage.json");
@@ -35,8 +35,9 @@ function loadServerConfig() {
     if (fs.existsSync(configPath)) {
       const raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
       const options = (raw.plugins && raw.plugins.options) || {};
-      for (const val of Object.values(options)) {
+      for (const [key, val] of Object.entries(options)) {
         if (!val || typeof val !== "object") continue;
+        if (!key.toLowerCase().includes("zcode-dcp")) continue; // 与 hook 侧同规则，防其他插件的同名配置项覆盖
         if (val.archive_scope === "project" || val.archive_scope === "global") cfg.archive_scope = val.archive_scope;
         if (Number.isFinite(+val.max_blocks) && +val.max_blocks > 0) cfg.max_blocks = +val.max_blocks;
       }
@@ -51,9 +52,17 @@ function loadServerConfig() {
 const SRV_CFG = loadServerConfig();
 const PROJECT_DIR = String(process.env.DCP_PROJECT_DIR || "");
 
-function projectHash(dir) {
+function normalizeProjectDir(dir) {
   if (!dir) return "";
-  return crypto.createHash("sha256").update(String(dir)).digest("hex").slice(0, 12);
+  let d = String(dir);
+  try { d = path.resolve(d); } catch {}
+  if (d.endsWith(path.sep) && d.length > 3) d = d.slice(0, -path.sep.length);
+  return process.platform === "win32" ? d.toLowerCase() : d; // 与 hook 侧同规则
+}
+function projectHash(dir) {
+  const d = normalizeProjectDir(dir);
+  if (!d) return "";
+  return crypto.createHash("sha256").update(d).digest("hex").slice(0, 12);
 }
 function blocksFile() {
   if (SRV_CFG.archive_scope !== "project" || !PROJECT_DIR) return LEGACY_BLOCKS_FILE;
@@ -96,11 +105,20 @@ function loadBlocks() {
 function saveBlocks() {
   try {
     fs.mkdirSync(STATE_DIR, { recursive: true });
-    fs.writeFileSync(
-      blocksFile(),
-      JSON.stringify({ blocks: state.blocks, nextBlockId: state.nextBlockId, savedAt: new Date().toISOString() }, null, 2),
-      "utf-8"
+    const data = JSON.stringify(
+      { blocks: state.blocks, nextBlockId: state.nextBlockId, savedAt: new Date().toISOString() },
+      null,
+      2
     );
+    const file = blocksFile();
+    const tmp = file + ".tmp";
+    fs.writeFileSync(tmp, data, "utf-8");
+    try {
+      fs.renameSync(tmp, file); // 原子替换，防写中程崩溃把归档整文件损坏
+    } catch {
+      fs.writeFileSync(file, data, "utf-8");
+      try { fs.rmSync(tmp, { force: true }); } catch {}
+    }
   } catch {} // 写失败静默：保留内存可用（spec: 无害降级）
 }
 
@@ -108,7 +126,8 @@ function saveBlocks() {
 function enforceMaxBlocks() {
   const active = () => state.blocks.filter((b) => b.active);
   if (active().length <= SRV_CFG.max_blocks) return null;
-  const distillCount = Math.max(1, Math.ceil(active().length * 0.2));
+  // 精确回落到上限（至少蒸馏 1 块；max_blocks=1 时也能收敛），替代此前 ceil(20%) 的过冲语义
+  const distillCount = Math.max(1, active().length - SRV_CFG.max_blocks + 1);
   const oldest = active().slice(0, distillCount);
   const sections = oldest.map((b) => {
     const sum = String(b.summary || "");
@@ -220,13 +239,18 @@ const tools = [
       required: ["topic", "summary"],
     },
     handler(args) {
+      const topic = args.topic == null ? "" : String(args.topic).trim();
+      const summary = args.summary == null ? "" : String(args.summary).trim();
+      if (!topic || !summary) {
+        return { error: "topic 与 summary 为必填且不能为空，未归档。" };
+      }
       const blockId = formatBlockId(state.nextBlockId);
       const block = {
         blockId,
-        topic: String(args.topic || "未命名"),
-        summary: String(args.summary || ""),
+        topic,
+        summary,
         tags: Array.isArray(args.tags) ? args.tags.map(String) : [],
-        type: args.type || "general",
+        type: ["general", "tool_result", "error", "duplicate"].includes(args.type) ? args.type : "general",
         createdAt: new Date().toISOString(),
         active: true,
       };
@@ -455,6 +479,7 @@ function handleMessage(msg) {
       break;
     case "tools/call": {
       const params = msg.params || {};
+      loadBlocks(); // 变更/读取前重读磁盘：缩小同项目双实例 last-writer-wins 竞态窗口，并让跨窗口新块可见
       const tool = tools.find((t) => t.name === params.name);
       if (!tool) {
         reply(msg.id, null, { code: -32602, message: `Unknown tool: ${params.name}` });
@@ -462,7 +487,7 @@ function handleMessage(msg) {
       }
       try {
         const out = tool.handler(params.arguments || {});
-        reply(msg.id, textResult(out));
+        reply(msg.id, typeof out.error === "string" && !out.content ? textResult({ ...out, isError: true }) : textResult(out));
       } catch (err) {
         reply(msg.id, { content: [{ type: "text", text: "工具执行失败: " + (err && err.message) }], isError: true });
       }

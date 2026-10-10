@@ -21,3 +21,9 @@
 
 - [x] 4.1 版本 0.4.0；README（新配置、absorb-lite 致谢 acp-kernel absorb.ts、压缩检测说明）；两份 marketplace 同步。验证：版本一致
 - [x] 4.2 冒烟全绿（v03 回归 + v04 新用例）后同步 GitHub 仓库并 push。验证：远端版本 0.4.0
+
+## 5. Oracle 审查修复（v0.4.1）
+
+- [x] 5.1 P0：detectCompact 前值会话归属校验（跨窗口切换不再伪造压缩/污染校准）；校准准入门槛（仅采窗口后 40% 区间的压缩）。验证：v041 冒烟 T7/T8
+- [x] 5.2 P1：tools/call 前重读 blocks（缩小双实例竞态）；writeJson/saveBlocks 原子写（tmp+rename）；召回改确定性标记 recall-pending-<sid>.json（stop 检出→下轮 prompt/session-start 注入并清除）。验证：v041 冒烟 T9
+- [x] 5.3 P2/P3：server 配置加载补 zcode-dcp key 过滤；compress 入参校验（缺 topic/summary 返回 isError，type 非法回退 general）；蒸馏语义改精确回落（active−max+1，spec 同步）；项目路径归一化（resolve+去尾斜杠+win32 小写）；absorb 估算改 CJK 感知。验证：v041 冒烟 T10/T11
