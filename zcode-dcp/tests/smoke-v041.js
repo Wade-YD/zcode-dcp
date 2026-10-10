@@ -96,8 +96,10 @@ reset();
   check("T10 中文大结果触发 absorb", out1.includes("dcp absorb") && out1.includes("9,000"), out1.slice(0, 120));
 }
 
-// ---------- T11 路径归一化：大小写/尾斜杠/相对差异 → 同一命名空间 ----------
-{
+// ---------- T11 路径归一化：大小写/尾斜杠 → 同一命名空间（大小写折叠为 Windows 专属行为） ----------
+if (process.platform !== "win32") {
+  console.log("SKIP T11（大小写折叠是 Windows 专属归一行为，Linux 路径大小写敏感）");
+} else {
   const envA = { DCP_PROJECT_DIR: "E:\\projX\\sub" };
   const envB = { DCP_PROJECT_DIR: "e:/projx/sub/" };
   const rA = rpc([INIT, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "compress", arguments: { topic: "命名空间一致性", summary: "check" } } }], envA);
