@@ -1,5 +1,7 @@
 # ZCode DCP — Dynamic Context Pruning
 
+[![ci](https://github.com/Wade-YD/zcode-dcp/actions/workflows/ci.yml/badge.svg)](https://github.com/Wade-YD/zcode-dcp/actions/workflows/ci.yml)
+
 [中文](#简介) | [English](#english)
 
 <a id="简介"></a>
@@ -23,13 +25,14 @@ ZCode DCP 是一个 [ZCode](https://zcode.ai) 插件，用于**动态管理对�
 
 | 工具 / 命令 | 说明 |
 |---|---|
-| `compress(topic, summary, tags?, type?)` | 归档不再需要的对话内容为摘要（描述内嵌承重规则） |
+| `compress(topic, summary, tags?, type?)` | 归档不再需要的对话内容为摘要（描述内嵌承重规则；同名主题返回重复提示，超上限自动蒸馏） |
 | `decompress(blockId)` | 查看已归档块的完整内容 |
 | `search_context(query, limit?)` | 按关键词检索归档块（中英文，多词交集） |
-| `context_usage` / `/dcp-usage` | 当前真实上下文占用（tokens 与百分比） |
-| `context_stats` / `/dcp-stats` | 压缩统计 + 真实占用 |
-| `sweep(action)` / `/dcp-sweep` | 扫描可去重的调用与可清理的错误 |
-| 自动监控（hook） | 每轮计量；50/70/80% 三级阈值注入分级提醒；内核压缩后注入归档索引 |
+| `context_usage` / `/dcp-usage` | 当前真实上下文占用（tokens 与百分比，含窗口来源） |
+| `context_stats` / `/dcp-stats` | 压缩统计 + 重复主题/错误块洞察 + 真实占用 |
+| 自动监控（hook） | 每轮计量；50/70/80% 三级阈值注入分级提醒；压缩检测与召回；大工具结果蒸馏提示 |
+
+> v0.5 起 `sweep` 工具已移除：其去重职责由 compress 的重复提示覆盖，统计面由 `context_stats` 的 insights 承接。
 
 ## 安装
 
@@ -100,21 +103,14 @@ hook（auto-watch.cjs）读取
 - ⚠️ **压缩检测为启发式**：用量骤降 ≥40% 且前后属同一会话才判定压缩——会话回退/换模型/切换窗口不会误报；窗口校准只采"窗口后 40% 区间"的压缩（低水位手动 /compact 不污染校准）
 - ⚠️ **absorb-lite（实验性）**：仅注入蒸馏提示，无法隐藏原始工具结果（内核独占）；token 估算 CJK 感知（中文每字≈1 token），有阈值与会话级 10 分钟冷却双重限流，`absorb_min_tool_tokens=0` 可关闭
 - ⚠️ 同项目多窗口并行时，归档写入仍存在极小的 last-writer-wins 竞态窗口（已通过变更前重读显著缩小）；如遇极端并发可临时切换 `archive_scope=global` 观察
+- ⚠️ `archive_scope=global` 时归档跨项目共享，session-start 会把其他项目的主题行注入当前会话——含敏感路径的项目请保持默认 project
 
 ## 开发
 
-零依赖，纯 Node.js（无需 `npm install`）：
+零依赖，纯 Node.js（无需 `npm install`）。全量冒烟测试（Windows/Linux 均可跑，CI 矩阵自动执行）：
 
 ```bash
-# MCP server 冒烟测试
-printf '%s\n' \
-  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}' \
-  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-  | node zcode-dcp/dist/mcp/server.js
-
-# 计量脚本测试（用任意真实会话 ID）
-echo '{"session_id":"<你的会话ID>","hook_event_name":"UserPromptSubmit"}' \
-  | node zcode-dcp/hooks/auto-watch.cjs
+node tests/run-all.js        # 4 个套件：回归 / v0.4 系 / 审查修复 / v0.5
 ```
 
 欢迎 PR：跨平台 hook 包装、压缩后召回的端到端实测反馈、更多压缩策略、占用趋势记录、更好看的统计输出……

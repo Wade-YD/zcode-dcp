@@ -19,19 +19,20 @@
 
 const fs = require("fs");
 const path = require("path");
-const os = require("os");
-const crypto = require("crypto");
+const {
+  STATE_DIR,
+  ROLLOUT_DIR,
+  USAGE_FILE,
+  KERNEL_COMPACT_RESERVE,
+  readJson,
+  writeJson,
+  sanitizeSid,
+  blocksFileFor,
+  eachPluginOption,
+} = require("../dist/dcp-common.cjs"); // 相对本文件：hooks → dist/dcp-common.cjs
 
-const HOME = os.homedir();
-const STATE_DIR = path.join(HOME, ".zcode", "dcp");
-const USAGE_FILE = path.join(STATE_DIR, "usage.json");
-const NUDGE_FILE = path.join(STATE_DIR, "nudge.json"); // v0.3 旧文件（仅迁移兼容，不再写）
-const ROLLOUT_DIR = path.join(HOME, ".zcode", "cli", "rollout");
 const COMPACT_STATS_FILE = path.join(STATE_DIR, "compact-stats.json");
 const CALIBRATION_FILE = path.join(STATE_DIR, "window-calibration.json");
-
-// 内核压缩触发点 ≈ 窗口 − 34K（逆向 zcode.cjs 常量：窗口−21K 输出预留−13K buffer）
-const KERNEL_COMPACT_RESERVE = 34000;
 
 const DEFAULTS = {
   context_window_tokens: 1000000,
@@ -51,18 +52,7 @@ const DEFAULTS = {
 // config.json（plugins.options 里含 "zcode-dcp" 的键）是 userConfig 到达 hook 的唯一正式通道。
 function loadConfig() {
   const cfg = { ...DEFAULTS, _windowExplicit: false };
-  try {
-    const configPath = path.join(HOME, ".zcode", "cli", "config.json");
-    if (fs.existsSync(configPath)) {
-      const raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-      const options = (raw.plugins && raw.plugins.options) || {};
-      for (const [key, val] of Object.entries(options)) {
-        if (!val || typeof val !== "object") continue;
-        if (!key.toLowerCase().includes("zcode-dcp")) continue;
-        applyConfigObject(cfg, val);
-      }
-    }
-  } catch {}
+  eachPluginOption((val) => applyConfigObject(cfg, val));
   const num = (name) => {
     const v = Number(process.env[name]);
     return Number.isFinite(v) && v > 0 ? v : null;
@@ -111,27 +101,6 @@ function applyConfigObject(cfg, val) {
 }
 
 // ---------- 窗口校准 ----------
-function readJson(file) {
-  try {
-    return JSON.parse(fs.readFileSync(file, "utf-8"));
-  } catch {
-    return null;
-  }
-}
-function writeJson(file, obj) {
-  try {
-    fs.mkdirSync(STATE_DIR, { recursive: true });
-    const data = JSON.stringify(obj, null, 2);
-    const tmp = file + ".tmp";
-    fs.writeFileSync(tmp, data, "utf-8");
-    try {
-      fs.renameSync(tmp, file); // 原子替换，防写中程崩溃损坏状态文件
-    } catch {
-      fs.writeFileSync(file, data, "utf-8");
-      try { fs.rmSync(tmp, { force: true }); } catch {}
-    }
-  } catch {}
-}
 
 function recordCalibration(preTokens) {
   const observed = preTokens + KERNEL_COMPACT_RESERVE;
@@ -158,32 +127,7 @@ function effectiveWindow(cfg) {
   return { window: cfg.context_window_tokens, source: "default" };
 }
 
-// ---------- 会话与命名空间 ----------
-function sanitizeSid(sid) {
-  return String(sid || "").replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 64) || "unknown";
-}
-function normalizeProjectDir(dir) {
-  if (!dir) return "";
-  let d = String(dir);
-  try { d = path.resolve(d); } catch {}
-  if (d.endsWith(path.sep) && d.length > 3) d = d.slice(0, -path.sep.length);
-  // 大小写/尾斜杠归一，防同项目被劈成两个命名空间
-  return process.platform === "win32" ? d.toLowerCase() : d;
-}
-function projectHash(projectDir) {
-  const d = normalizeProjectDir(projectDir);
-  if (!d) return "";
-  return crypto.createHash("sha256").update(d).digest("hex").slice(0, 12);
-}
-function blocksFileFor(projectDir, scope) {
-  if (scope !== "project" || !projectDir) return path.join(STATE_DIR, "blocks.json");
-  const f = path.join(STATE_DIR, `blocks-${projectHash(projectDir)}.json`);
-  if (!fs.existsSync(f)) {
-    const legacy = readJson(path.join(STATE_DIR, "blocks.json"));
-    if (legacy && Array.isArray(legacy.blocks)) writeJson(f, legacy); // 一次性种子迁移
-  }
-  return f;
-}
+// ---------- 会话与命名空间（哈希/原子读写/种子迁移在 dist/dcp-common.cjs） ----------
 function nudgeFileFor(sid) {
   return path.join(STATE_DIR, `nudge-${sanitizeSid(sid)}.json`);
 }
@@ -392,8 +336,7 @@ function sessionStartText(projectDir, scope) {
     "",
     "# decompress(blockId) — 取回归档块全文",
     "# search_context(query, limit?) — 按关键词检索归档块",
-    "# context_stats() / context_usage() — 压缩统计 / 真实上下文占用",
-    "# sweep(action) — 去重/错误清理建议",
+    "# context_stats() / context_usage() — 压缩统计（含重复主题/错误块洞察） / 真实上下文占用",
     "",
     "## 压缩原则",
     `1. 主动归档：${PRIORITY_LIST}`,
@@ -406,6 +349,9 @@ function sessionStartText(projectDir, scope) {
   if (usage && Number.isFinite(usage.usedTokens) && Number.isFinite(usage.contextWindowTokens)) {
     const pct = Math.min(100, (usage.usedTokens / usage.contextWindowTokens) * 100).toFixed(1);
     parts.push("", `[dcp 状态] 当前上下文占用 ${pct}%（${fmtNum(usage.usedTokens)} / ${fmtNum(usage.contextWindowTokens)} tokens，更新于 ${usage.updatedAt || "未知时间"}）。`);
+  }
+  if (scope === "global") {
+    parts.push("", "[dcp 提示] 归档为全局共享（archive_scope=global），索引可能包含其他项目的路径与信息。");
   }
   parts.push("", buildArchiveIndexSection(projectDir, scope));
   return parts.join("\n");

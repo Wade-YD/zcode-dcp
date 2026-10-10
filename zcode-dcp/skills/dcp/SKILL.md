@@ -22,14 +22,14 @@ description: Dynamic Context Pruning v2 - 当对话变长、上下文占用达�
 ### mcp__plugin_zcode-dcp_dcp__decompress(blockId)
 查看已归档块的完整内容。
 
+### mcp__plugin_zcode-dcp_dcp__search_context(query, limit?)
+按关键词检索归档块（中英文、多词交集），返回 blockId/topic/命中片段。
+
 ### mcp__plugin_zcode-dcp_dcp__context_stats()
-压缩统计 + 当前真实上下文占用。
+压缩统计（含重复主题/错误块洞察）+ 当前真实上下文占用。
 
 ### mcp__plugin_zcode-dcp_dcp__context_usage()
 当前真实上下文占用（tokens 与百分比），来自每轮自动计量（hook 读取 ZCode 模型 IO 日志）。
-
-### mcp__plugin_zcode-dcp_dcp__sweep(action)
-扫描对话，识别可去重/清理的内容。action: "deduplicate" | "purge_errors" | "all"。
 
 ## 自动监控（v2 新增）
 

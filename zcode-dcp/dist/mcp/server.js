@@ -8,7 +8,7 @@
  *  search_context  按关键词检索归档块（中英文，多词交集；project scope 下仅限本项目）
  *  context_stats   归档统计 + 真实上下文占用（hook 写入的 usage.json）
  *  context_usage   当前真实上下文占用
- *  sweep           去重/错误清理建议
+ *  sweep           （v0.5 已移除——去重由 compress 的 possibleDuplicates 覆盖，统计见 context_stats.insights）
  *
  * 协议: MCP stdio（按行分隔的 JSON-RPC 2.0），无第三方依赖。
  * 持久化: 归档块存 ~/.zcode/dcp/blocks[-<项目哈希>].json（archive_scope=project 默认按项目隔离，旧全局文件种子迁移）。
@@ -17,32 +17,25 @@
 "use strict";
 
 const fs = require("fs");
-const path = require("path");
-const os = require("os");
-const crypto = require("crypto");
+const {
+  STATE_DIR,
+  USAGE_FILE,
+  readJson,
+  writeJson,
+  blocksFileFor,
+  eachPluginOption,
+} = require("../dcp-common.cjs"); // 相对本文件：dist/mcp → dist/dcp-common.cjs
 
-const SERVER_INFO = { name: "zcode-dcp", version: "0.4.1" };
-const HOME = os.homedir();
-const STATE_DIR = path.join(HOME, ".zcode", "dcp");
-const USAGE_FILE = path.join(STATE_DIR, "usage.json");
-const LEGACY_BLOCKS_FILE = path.join(STATE_DIR, "blocks.json");
+const SERVER_INFO = { name: "zcode-dcp", version: "0.5.0" };
+const PROJECT_DIR = String(process.env.DCP_PROJECT_DIR || "");
 
-// ---------- 配置（env > config.json > 默认，与 hook 同规则） ----------
+// ---------- 配置（env > config.json > 默认，遍历与过滤规则在 dcp-common） ----------
 function loadServerConfig() {
   const cfg = { archive_scope: "project", max_blocks: 200 };
-  try {
-    const configPath = path.join(HOME, ".zcode", "cli", "config.json");
-    if (fs.existsSync(configPath)) {
-      const raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-      const options = (raw.plugins && raw.plugins.options) || {};
-      for (const [key, val] of Object.entries(options)) {
-        if (!val || typeof val !== "object") continue;
-        if (!key.toLowerCase().includes("zcode-dcp")) continue; // 与 hook 侧同规则，防其他插件的同名配置项覆盖
-        if (val.archive_scope === "project" || val.archive_scope === "global") cfg.archive_scope = val.archive_scope;
-        if (Number.isFinite(+val.max_blocks) && +val.max_blocks > 0) cfg.max_blocks = +val.max_blocks;
-      }
-    }
-  } catch {}
+  eachPluginOption((val) => {
+    if (val.archive_scope === "project" || val.archive_scope === "global") cfg.archive_scope = val.archive_scope;
+    if (Number.isFinite(+val.max_blocks) && +val.max_blocks > 0) cfg.max_blocks = +val.max_blocks;
+  });
   if (process.env.DCP_ARCHIVE_SCOPE === "project" || process.env.DCP_ARCHIVE_SCOPE === "global")
     cfg.archive_scope = process.env.DCP_ARCHIVE_SCOPE;
   if (Number.isFinite(+process.env.DCP_MAX_BLOCKS) && +process.env.DCP_MAX_BLOCKS > 0)
@@ -50,29 +43,9 @@ function loadServerConfig() {
   return cfg;
 }
 const SRV_CFG = loadServerConfig();
-const PROJECT_DIR = String(process.env.DCP_PROJECT_DIR || "");
 
-function normalizeProjectDir(dir) {
-  if (!dir) return "";
-  let d = String(dir);
-  try { d = path.resolve(d); } catch {}
-  if (d.endsWith(path.sep) && d.length > 3) d = d.slice(0, -path.sep.length);
-  return process.platform === "win32" ? d.toLowerCase() : d; // 与 hook 侧同规则
-}
-function projectHash(dir) {
-  const d = normalizeProjectDir(dir);
-  if (!d) return "";
-  return crypto.createHash("sha256").update(d).digest("hex").slice(0, 12);
-}
 function blocksFile() {
-  if (SRV_CFG.archive_scope !== "project" || !PROJECT_DIR) return LEGACY_BLOCKS_FILE;
-  const f = path.join(STATE_DIR, `blocks-${projectHash(PROJECT_DIR)}.json`);
-  if (!fs.existsSync(f)) {
-    try {
-      if (fs.existsSync(LEGACY_BLOCKS_FILE)) fs.copyFileSync(LEGACY_BLOCKS_FILE, f); // 一次性种子迁移
-    } catch {}
-  }
-  return f;
+  return blocksFileFor(PROJECT_DIR, SRV_CFG.archive_scope);
 }
 
 // ---------- 状态（启动时从 blocks.json 加载） ----------
@@ -83,52 +56,35 @@ const state = {
 };
 
 function loadBlocks() {
-  try {
-    const file = blocksFile();
-    if (!fs.existsSync(file)) return;
-    const raw = JSON.parse(fs.readFileSync(file, "utf-8"));
-    if (Array.isArray(raw.blocks)) {
-      state.blocks = raw.blocks.filter((b) => b && b.blockId);
-      const maxExisting = state.blocks.reduce(
-        (m, b) => Math.max(m, parseInt(String(b.blockId).slice(1), 10) || 0),
-        0
-      );
-      // nextBlockId 取文件值与最大已有 ID+1 的较大者，防止 ID 碰撞
-      state.nextBlockId = Math.max(
-        Number.isFinite(raw.nextBlockId) && raw.nextBlockId > 0 ? raw.nextBlockId : 0,
-        maxExisting + 1
-      );
-    }
-  } catch {}
+  const raw = readJson(blocksFile());
+  if (!raw || !Array.isArray(raw.blocks)) return;
+  state.blocks = raw.blocks.filter((b) => b && b.blockId);
+  const maxExisting = state.blocks.reduce(
+    (m, b) => Math.max(m, parseInt(String(b.blockId).slice(1), 10) || 0),
+    0
+  );
+  // nextBlockId 取文件值与最大已有 ID+1 的较大者，防止 ID 碰撞
+  state.nextBlockId = Math.max(
+    Number.isFinite(raw.nextBlockId) && raw.nextBlockId > 0 ? raw.nextBlockId : 0,
+    maxExisting + 1
+  );
 }
 
 function saveBlocks() {
-  try {
-    fs.mkdirSync(STATE_DIR, { recursive: true });
-    const data = JSON.stringify(
-      { blocks: state.blocks, nextBlockId: state.nextBlockId, savedAt: new Date().toISOString() },
-      null,
-      2
-    );
-    const file = blocksFile();
-    const tmp = file + ".tmp";
-    fs.writeFileSync(tmp, data, "utf-8");
-    try {
-      fs.renameSync(tmp, file); // 原子替换，防写中程崩溃把归档整文件损坏
-    } catch {
-      fs.writeFileSync(file, data, "utf-8");
-      try { fs.rmSync(tmp, { force: true }); } catch {}
-    }
-  } catch {} // 写失败静默：保留内存可用（spec: 无害降级）
+  // 原子写在 dcp-common.writeJson；失败静默，保留内存可用（spec: 无害降级）
+  writeJson(blocksFile(), {
+    blocks: state.blocks,
+    nextBlockId: state.nextBlockId,
+    savedAt: new Date().toISOString(),
+  });
 }
 
-// ---------- 生命周期：超限蒸馏最旧约 20%（Open objectives 逐字保留，遵 acp-kernel #442） ----------
+// ---------- 生命周期：超限蒸馏最旧块直至回落到上限（Open objectives 逐字保留，遵 acp-kernel #442） ----------
 function enforceMaxBlocks() {
-  const active = () => state.blocks.filter((b) => b.active);
-  if (active().length <= SRV_CFG.max_blocks) return null;
-  // 精确回落到上限（至少蒸馏 1 块；max_blocks=1 时也能收敛），替代此前 ceil(20%) 的过冲语义
-  const distillCount = Math.max(1, active().length - SRV_CFG.max_blocks + 1);
-  const oldest = active().slice(0, distillCount);
+  if (state.blocks.length <= SRV_CFG.max_blocks) return null;
+  // 精确回落到上限（至少蒸馏 1 块；max_blocks=1 时也能收敛）
+  const distillCount = Math.max(1, state.blocks.length - SRV_CFG.max_blocks + 1);
+  const oldest = state.blocks.slice(0, distillCount);
   const sections = oldest.map((b) => {
     const sum = String(b.summary || "");
     const truncated = sum.length > 800 ? sum.slice(0, 800) + "…" : sum;
@@ -142,7 +98,6 @@ function enforceMaxBlocks() {
     tags: ["distilled"],
     type: "general",
     createdAt: new Date().toISOString(),
-    active: true,
   };
   const removeIds = new Set(oldest.map((b) => b.blockId));
   state.blocks = state.blocks.filter((b) => !removeIds.has(b.blockId));
@@ -252,7 +207,6 @@ const tools = [
         tags: Array.isArray(args.tags) ? args.tags.map(String) : [],
         type: ["general", "tool_result", "error", "duplicate"].includes(args.type) ? args.type : "general",
         createdAt: new Date().toISOString(),
-        active: true,
       };
       state.blocks.push(block);
       state.nextBlockId += 1;
@@ -260,7 +214,7 @@ const tools = [
       state.stats.lastCompressionAt = block.createdAt;
       // 重复主题提示（归一化完全相等；不自动合并，遵 acp-kernel #442 教训）
       const possibleDuplicates = state.blocks
-        .filter((b) => b.active && b.blockId !== blockId && normTopic(b.topic) === normTopic(block.topic))
+        .filter((b) => b.blockId !== blockId && normTopic(b.topic) === normTopic(block.topic))
         .map((b) => b.blockId);
       // 生命周期：超限蒸馏
       const distilled = enforceMaxBlocks();
@@ -295,7 +249,7 @@ const tools = [
       if (!block) {
         return {
           error: `未找到块 ${args.blockId}`,
-          availableBlocks: state.blocks.filter((b) => b.active).map((b) => ({ blockId: b.blockId, topic: b.topic })),
+          availableBlocks: state.blocks.map((b) => ({ blockId: b.blockId, topic: b.topic })),
         };
       }
       state.stats.totalDecompressions += 1;
@@ -331,7 +285,6 @@ const tools = [
       const limit = Math.max(1, Math.min(50, Number.isFinite(+args.limit) ? +args.limit : 5));
       const scored = [];
       for (const b of state.blocks) {
-        if (!b.active) continue;
         const topic = String(b.topic || "");
         const tags = Array.isArray(b.tags) ? b.tags.join(" ") : "";
         const summary = String(b.summary || "");
@@ -368,25 +321,35 @@ const tools = [
   },
   {
     name: "context_stats",
-    description: "查看压缩统计（块数量/主题/历史）与当前真实上下文占用。",
+    description: "查看压缩统计（块数量/主题/历史、重复主题与错误块洞察）与当前真实上下文占用。",
     inputSchema: { type: "object", properties: {} },
     handler() {
-      const active = state.blocks.filter((b) => b.active);
+      const all = state.blocks;
+      const topicCount = {};
+      for (const b of all) {
+        const t = normTopic(b.topic);
+        if (t) topicCount[t] = (topicCount[t] || 0) + 1;
+      }
       return {
         sessionId: "in-session",
-        totalBlocks: active.length,
+        totalBlocks: all.length,
         totalCompressions: state.stats.totalCompressions,
         totalDecompressions: state.stats.totalDecompressions,
         lastCompressionAt: state.stats.lastCompressionAt ? formatLocalTime(state.stats.lastCompressionAt) : null,
+        insights: {
+          duplicateTopics: Object.values(topicCount).filter((n) => n > 1).length,
+          errorBlocks: all.filter((b) => b.type === "error").length,
+          note: "重复主题多时可换用更概括的 topic 重新归档（compress 会对同主题返回 possibleDuplicates）；errorBlocks 为 type=error 的归档块数",
+        },
         realUsage: usagePayload(),
-        compressedTopics: active.map((b) => ({
+        compressedTopics: all.map((b) => ({
           blockId: b.blockId,
           topic: b.topic,
           type: b.type,
           tags: b.tags,
           createdAt: formatLocalTime(b.createdAt),
         })),
-        message: `当前有 ${active.length} 个压缩块`,
+        message: `当前有 ${all.length} 个压缩块`,
       };
     },
   },
@@ -396,46 +359,6 @@ const tools = [
     inputSchema: { type: "object", properties: {} },
     handler() {
       return usagePayload();
-    },
-  },
-  {
-    name: "sweep",
-    description: "扫描对话历史，识别可去重的工具调用和可清理的错误信息。返回建议列表。",
-    inputSchema: {
-      type: "object",
-      properties: {
-        action: {
-          type: "string",
-          enum: ["deduplicate", "purge_errors", "all"],
-          description: "清理类型：deduplicate=去重, purge_errors=清理错误, all=全部",
-        },
-      },
-      required: ["action"],
-    },
-    handler(args) {
-      const cfgAutoSweep = String(process.env.DCP_AUTO_SWEEP || "true") !== "false";
-      const suggestions = [];
-      if (cfgAutoSweep) {
-        suggestions.push("【auto_sweep】自动清理已开启：每次压缩前建议先执行去重与错误清理扫描。");
-      }
-      if (args.action === "deduplicate" || args.action === "all") {
-        suggestions.push(
-          "【去重建议】检查对话中是否有相同工具+相同参数的重复调用。如有，只保留最新一次，将之前的调用及其结果用 compress 工具归档。"
-        );
-      }
-      if (args.action === "purge_errors" || args.action === "all") {
-        suggestions.push(
-          "【错误清理建议】检查对话中是否有返回错误的工具调用。如错误已解决或不再相关，可将错误上下文用 compress 归档，只保留错误类型和解决方案。"
-        );
-      }
-      return {
-        action: args.action,
-        realUsage: usagePayload(),
-        suggestions,
-        message: `扫描完成。以下是 ${
-          args.action === "all" ? "去重和错误清理" : args.action === "deduplicate" ? "去重" : "错误清理"
-        } 的建议：`,
-      };
     },
   },
 ];
@@ -449,6 +372,10 @@ function reply(id, result, error) {
 }
 
 function handleMessage(msg) {
+  if (Array.isArray(msg)) {
+    msg.forEach((m) => handleMessage(m)); // JSON-RPC batch
+    return;
+  }
   if (!msg || typeof msg !== "object") return;
   const isNotification = msg.id === undefined || msg.id === null;
   const method = msg.method || "";

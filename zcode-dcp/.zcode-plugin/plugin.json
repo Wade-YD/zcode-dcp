@@ -1,7 +1,7 @@
 {
   "name": "zcode-dcp",
-  "version": "0.4.1",
-  "description": "Dynamic Context Pruning v4 - 三级压缩提醒、压缩检测与窗口校准、会话隔离、按项目隔离的可检索归档与生命周期管理",
+  "version": "0.5.0",
+  "description": "Dynamic Context Pruning v5 - 三级压缩提醒、压缩检测与窗口校准、会话隔离、按项目隔离的可检索归档与生命周期管理",
   "author": {
     "name": "ZCode DCP"
   },
@@ -19,9 +19,6 @@
       "env": {
         "DCP_PLUGIN_ROOT": "${ZCODE_PLUGIN_ROOT}",
         "DCP_PROJECT_DIR": "${ZCODE_PROJECT_DIR}",
-        "DCP_MAX_CONTEXT_TOKENS": "${user_config.max_context_tokens}",
-        "DCP_NUDGE_THRESHOLD": "${user_config.nudge_threshold}",
-        "DCP_AUTO_SWEEP": "${user_config.auto_sweep}",
         "DCP_CONTEXT_WINDOW_TOKENS": "${user_config.context_window_tokens}",
         "DCP_NUDGE_PERCENT": "${user_config.nudge_percent}",
         "DCP_NUDGE_COOLDOWN_MINUTES": "${user_config.nudge_cooldown_minutes}",
@@ -92,24 +89,6 @@
       "type": "boolean",
       "title": "启用自动计量",
       "description": "每轮读取 ZCode 模型 IO 日志计量真实 token 占用，达到阈值时自动提醒压缩",
-      "default": true
-    },
-    "max_context_tokens": {
-      "type": "number",
-      "title": "旧版：最大上下文 token 数",
-      "description": "v0.1 兼容字段，仅用于统计展示",
-      "default": 100000
-    },
-    "nudge_threshold": {
-      "type": "number",
-      "title": "旧版：提醒阈值百分比",
-      "description": "v0.1 兼容字段，请改用 nudge_percent",
-      "default": 50
-    },
-    "auto_sweep": {
-      "type": "boolean",
-      "title": "自动清理建议",
-      "description": "压缩时附带去重与错误清理建议",
       "default": true
     }
   }
