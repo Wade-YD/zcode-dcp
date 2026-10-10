@@ -10,10 +10,12 @@ ZCode DCP 是一个 [ZCode](https://zcode.ai) 插件，用于**动态管理对�
 
 - **真实计量** — 每轮对话自动读取 ZCode 模型 IO 日志，得到当前上下文的真实 token 占用（含缓存读取），而不是靠猜测
 - **分级自动提醒** — 占用达到 50% / 70% / 80% 三级阈值时，自动向模型注入逐级升级的压缩提醒（温和归档 → 强制瘦身 → 建议手动压缩），无需你开口
+- **压缩检测与窗口校准** — 相邻两轮用量骤降 ≥40% 判定内核压缩发生：记录节省量、自动校准真实窗口（观测窗口 = 压缩前用量 + 34K）、即时注入归档索引召回
+- **会话隔离** — 提醒状态按会话分文件、计量严格匹配会话日志，多窗口并行互不干扰
+- **按项目隔离的归档** — 归档默认按项目目录分命名空间（防止项目间上下文漂移），超上限自动蒸馏最旧块（保留开放目标）
 - **承重提示词** — 提醒与工具描述内嵌逐字保留规则（完整路径+行号、报错原文、决策及理由……），归档摘要可 grep、可回溯
-- **内容归档** — `compress` 工具把旧的搜索/探索结果、已解决的报错、重复调用归档为摘要，持久化到磁盘
+- **absorb-lite（实验性）** — 超大工具结果（默认 ≥8000 tokens）落地时提醒模型立即蒸馏归档，别等 nudge
 - **随时回溯** — `search_context` 按关键词检索归档块（中英文），`decompress` 取回全文，跨会话有效
-- **压缩后召回** — ZCode 内核压缩（compact）发生后，自动向新对话注入归档索引，会话重建不失忆（实验性）
 
 > 一个诚实的说明：ZCode 插件**无法删除对话历史里的消息**（这是内核能力，任何插件都做不到）。本插件做的是「归档瘦身」——它不会让占用条下降；真正释放 token 的是 ZCode 内置压缩（占用约 83% 时自动触发，或手动 `/compact`）。本插件的价值在于：50% 就开始阻止垃圾内容堆积、把重要信息摘要化，让 83% 那次自动压缩丢的信息更少。
 
@@ -54,6 +56,9 @@ ZCode DCP 是一个 [ZCode](https://zcode.ai) 插件，用于**动态管理对�
 | `tier3_percent` | 80 | tier3 升级阈值（建议 /compact + 交接摘要） |
 | `nudge_growth_tokens` | 30000 | 同级重复提醒的增长步进（与冷却时间双条件，防打扰） |
 | `nudge_cooldown_minutes` | 10 | 同级提醒的时间冷却 |
+| `archive_scope` | project | 归档作用域：project=按项目目录隔离（推荐）；global=所有项目共享 |
+| `max_blocks` | 200 | 归档块上限，超限自动蒸馏合并最旧约 20% |
+| `absorb_min_tool_tokens` | 8000 | 大工具结果蒸馏提示阈值（0 = 关闭 absorb-lite） |
 | `auto_watch` | true | 关闭后回到纯手动模式 |
 
 ## 工作原理
@@ -69,18 +74,22 @@ hook（auto-watch.cjs）读取
         │
         └─ 占用 ≥50% / ≥70% / ≥80% → 注入对应层级的压缩提醒
            （同级重复提醒需同时满足：冷却 10 分钟 且 增长 ≥30000 tokens；
-             层级升级立即触发，跳过下级冷却）
+             层级升级立即触发，跳过下级冷却；状态按会话隔离）
                 │
                 ▼
         输出 additionalContext，向模型注入压缩指令
         （模型随后调用 compress 归档旧内容）
+
+相邻两轮用量骤降 ≥40% → 判定内核压缩发生：
+        记录压缩统计（compact-stats.json）→ 以"压缩前用量 + 34K"校准真实窗口
+        → 重置该会话提醒层级 → 下一轮注入归档索引召回
 ```
 
-归档块持久化于 `~/.zcode/dcp/blocks.json`，跨会话可 `search_context` 检索、`decompress` 取回；内核 compact 发生后，会话启动 hook 会向新对话注入归档索引与当前占用。
+归档块按 `archive_scope` 持久化于 `~/.zcode/dcp/blocks[-<项目哈希>].json`，跨会话可 `search_context` 检索、`decompress` 取回；超过 `max_blocks` 时最旧约 20% 自动蒸馏合并（各块的 Open objectives 行逐字保留）。窗口校准仅在未显式配置 `context_window_tokens` 时生效（config > calibrated > 默认 1M，`context_usage` 的 windowSource 字段可见来源）。
 
 ## 致谢
 
-分级提醒与压缩规则的提示词工程改写自 [acp-kernel](https://github.com/ranxianglei/acp-kernel)（MIT，@ranxianglei）——其 KEEP VERBATIM 承重规则、压缩优先级清单与防污染条款在生产环境打磨数月，并经事故报告修正（#309 / #442 / #493）。架构上本插件与其同源的 billion-context 代理方案互补：代理路线通过改写 API 请求实现物理压缩，本插件在 ZCode 的签名限制（ClientRequestSigningV4 强制 HTTPS）下提供纯插件面的引导式压缩。
+分级提醒与压缩规则的提示词工程改写自 [acp-kernel](https://github.com/ranxianglei/acp-kernel)（MIT，@ranxianglei）——其 KEEP VERBATIM 承重规则、压缩优先级清单与防污染条款在生产环境打磨数月，并经事故报告修正（#309 / #442 / #493）；absorb-lite 的即时蒸馏语义改写自其 [absorb.ts](https://github.com/ranxianglei/acp-kernel/blob/master/src/absorb.ts)（插件侧仅能注入提示，无法隐藏原文）。架构上本插件与其同源的 billion-context 代理方案互补：代理路线通过改写 API 请求实现物理压缩，本插件在 ZCode 的签名限制（ClientRequestSigningV4 强制 HTTPS）下提供纯插件面的引导式压缩。
 
 ## 已验证环境与已知限制
 
@@ -88,7 +97,8 @@ hook（auto-watch.cjs）读取
 - ⚠️ **macOS / Linux**：把 `hooks/hooks.json` 里的命令换成直接调用 `node auto-watch.cjs`（或写一个 `.sh` 包装）即可，欢迎 PR
 - ⚠️ 上下文占用来自上一轮模型请求的 `inputTokens`，是「本轮开始时」的准确值；一轮内大量工具调用造成的增长要等下一轮才可见
 - ⚠️ 归档不减少当前 token（见上文说明）
-- ⚠️ **压缩后召回（实验性）**：内核 compact 后是否触发会话启动 hook 未经端到端实测（内核源码与官方插件 matcher `startup|clear|compact` 均支持该分支，但缺少真实压缩事件的现场观察）；即使不触发，本特性无害退化。欢迎在真实长会话中验证并反馈
+- ⚠️ **压缩检测为启发式**：用量骤降 ≥40% 判定压缩——会话回退/换模型也会呈现骤降而误报，后果仅是多注入一次召回（无害）；内核不暴露压缩 hook 事件（PostCompact 为内部事件），这是插件侧的最优解
+- ⚠️ **absorb-lite（实验性）**：仅注入蒸馏提示，无法隐藏原始工具结果（内核独占）；有 token 阈值与会话级 10 分钟冷却双重限流，`absorb_min_tool_tokens=0` 可关闭
 
 ## 开发
 

@@ -1,29 +1,70 @@
 #!/usr/bin/env node
 /**
- * ZCode DCP v0.3.0 MCP Server (dependency-free)
+ * ZCode DCP v0.4.0 MCP Server (dependency-free)
  *
  * 工具:
- *  compress        归档不再需要的对话内容为摘要（描述内嵌承重提示词，改写自 acp-kernel MIT）
+ *  compress        归档不再需要的对话内容为摘要（描述内嵌承重提示词，改写自 acp-kernel MIT；超限自动蒸馏、重复主题提示）
  *  decompress      查看已归档块
- *  search_context  按关键词检索归档块（中英文，多词交集）
+ *  search_context  按关键词检索归档块（中英文，多词交集；project scope 下仅限本项目）
  *  context_stats   归档统计 + 真实上下文占用（hook 写入的 usage.json）
  *  context_usage   当前真实上下文占用
  *  sweep           去重/错误清理建议
  *
  * 协议: MCP stdio（按行分隔的 JSON-RPC 2.0），无第三方依赖。
- * 持久化: 归档块存 ~/.zcode/dcp/blocks.json（启动加载、compress 后写盘、写失败静默降级为内存）。
- * 提示词出处: 承重规则 adapted from acp-kernel (MIT, @ranxianglei)。
+ * 持久化: 归档块存 ~/.zcode/dcp/blocks[-<项目哈希>].json（archive_scope=project 默认按项目隔离，旧全局文件种子迁移）。
+ * 提示词出处: 承重规则 adapted from acp-kernel (MIT, @ranxianglei)；蒸馏保留 Open objectives 遵其 #442 教训。
  */
 "use strict";
 
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const crypto = require("crypto");
 
-const SERVER_INFO = { name: "zcode-dcp", version: "0.3.0" };
-const STATE_DIR = path.join(os.homedir(), ".zcode", "dcp");
+const SERVER_INFO = { name: "zcode-dcp", version: "0.4.0" };
+const HOME = os.homedir();
+const STATE_DIR = path.join(HOME, ".zcode", "dcp");
 const USAGE_FILE = path.join(STATE_DIR, "usage.json");
-const BLOCKS_FILE = path.join(STATE_DIR, "blocks.json");
+const LEGACY_BLOCKS_FILE = path.join(STATE_DIR, "blocks.json");
+
+// ---------- 配置（env > config.json > 默认，与 hook 同规则） ----------
+function loadServerConfig() {
+  const cfg = { archive_scope: "project", max_blocks: 200 };
+  try {
+    const configPath = path.join(HOME, ".zcode", "cli", "config.json");
+    if (fs.existsSync(configPath)) {
+      const raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+      const options = (raw.plugins && raw.plugins.options) || {};
+      for (const val of Object.values(options)) {
+        if (!val || typeof val !== "object") continue;
+        if (val.archive_scope === "project" || val.archive_scope === "global") cfg.archive_scope = val.archive_scope;
+        if (Number.isFinite(+val.max_blocks) && +val.max_blocks > 0) cfg.max_blocks = +val.max_blocks;
+      }
+    }
+  } catch {}
+  if (process.env.DCP_ARCHIVE_SCOPE === "project" || process.env.DCP_ARCHIVE_SCOPE === "global")
+    cfg.archive_scope = process.env.DCP_ARCHIVE_SCOPE;
+  if (Number.isFinite(+process.env.DCP_MAX_BLOCKS) && +process.env.DCP_MAX_BLOCKS > 0)
+    cfg.max_blocks = +process.env.DCP_MAX_BLOCKS;
+  return cfg;
+}
+const SRV_CFG = loadServerConfig();
+const PROJECT_DIR = String(process.env.DCP_PROJECT_DIR || "");
+
+function projectHash(dir) {
+  if (!dir) return "";
+  return crypto.createHash("sha256").update(String(dir)).digest("hex").slice(0, 12);
+}
+function blocksFile() {
+  if (SRV_CFG.archive_scope !== "project" || !PROJECT_DIR) return LEGACY_BLOCKS_FILE;
+  const f = path.join(STATE_DIR, `blocks-${projectHash(PROJECT_DIR)}.json`);
+  if (!fs.existsSync(f)) {
+    try {
+      if (fs.existsSync(LEGACY_BLOCKS_FILE)) fs.copyFileSync(LEGACY_BLOCKS_FILE, f); // 一次性种子迁移
+    } catch {}
+  }
+  return f;
+}
 
 // ---------- 状态（启动时从 blocks.json 加载） ----------
 const state = {
@@ -34,14 +75,20 @@ const state = {
 
 function loadBlocks() {
   try {
-    if (!fs.existsSync(BLOCKS_FILE)) return;
-    const raw = JSON.parse(fs.readFileSync(BLOCKS_FILE, "utf-8"));
+    const file = blocksFile();
+    if (!fs.existsSync(file)) return;
+    const raw = JSON.parse(fs.readFileSync(file, "utf-8"));
     if (Array.isArray(raw.blocks)) {
       state.blocks = raw.blocks.filter((b) => b && b.blockId);
-      state.nextBlockId =
-        Number.isFinite(raw.nextBlockId) && raw.nextBlockId > 0
-          ? raw.nextBlockId
-          : state.blocks.reduce((m, b) => Math.max(m, parseInt(String(b.blockId).slice(1), 10) || 0), 0) + 1;
+      const maxExisting = state.blocks.reduce(
+        (m, b) => Math.max(m, parseInt(String(b.blockId).slice(1), 10) || 0),
+        0
+      );
+      // nextBlockId 取文件值与最大已有 ID+1 的较大者，防止 ID 碰撞
+      state.nextBlockId = Math.max(
+        Number.isFinite(raw.nextBlockId) && raw.nextBlockId > 0 ? raw.nextBlockId : 0,
+        maxExisting + 1
+      );
     }
   } catch {}
 }
@@ -50,12 +97,42 @@ function saveBlocks() {
   try {
     fs.mkdirSync(STATE_DIR, { recursive: true });
     fs.writeFileSync(
-      BLOCKS_FILE,
+      blocksFile(),
       JSON.stringify({ blocks: state.blocks, nextBlockId: state.nextBlockId, savedAt: new Date().toISOString() }, null, 2),
       "utf-8"
     );
   } catch {} // 写失败静默：保留内存可用（spec: 无害降级）
 }
+
+// ---------- 生命周期：超限蒸馏最旧约 20%（Open objectives 逐字保留，遵 acp-kernel #442） ----------
+function enforceMaxBlocks() {
+  const active = () => state.blocks.filter((b) => b.active);
+  if (active().length <= SRV_CFG.max_blocks) return null;
+  const distillCount = Math.max(1, Math.ceil(active().length * 0.2));
+  const oldest = active().slice(0, distillCount);
+  const sections = oldest.map((b) => {
+    const sum = String(b.summary || "");
+    const truncated = sum.length > 800 ? sum.slice(0, 800) + "…" : sum;
+    const oo = sum.split(/\r?\n/).filter((l) => /open objectives/i.test(l));
+    return `## ${b.topic}\n${truncated}${oo.length ? "\n" + oo.join("\n") : ""}`;
+  });
+  const distilled = {
+    blockId: formatBlockId(state.nextBlockId),
+    topic: `蒸馏归档 ${new Date().toISOString().slice(0, 10)}（${oldest.length} 块合并）`,
+    summary: sections.join("\n\n"),
+    tags: ["distilled"],
+    type: "general",
+    createdAt: new Date().toISOString(),
+    active: true,
+  };
+  const removeIds = new Set(oldest.map((b) => b.blockId));
+  state.blocks = state.blocks.filter((b) => !removeIds.has(b.blockId));
+  state.nextBlockId += 1;
+  state.blocks.push(distilled);
+  return distilled;
+}
+
+const normTopic = (s) => String(s || "").trim().toLowerCase().replace(/\s+/g, " ");
 
 function formatBlockId(n) {
   return "b" + String(n).padStart(3, "0");
@@ -96,6 +173,7 @@ function usagePayload() {
     available: true,
     usedTokens: u.usedTokens,
     contextWindowTokens: u.contextWindowTokens,
+    windowSource: u.windowSource,
     usedPercent: u.usedPercent,
     nudgeThresholdPercent: u.thresholdPercent,
     tier2Percent: u.tier2Percent,
@@ -105,7 +183,9 @@ function usagePayload() {
     updatedAt: u.updatedAt,
     ageMinutes: Number.isFinite(ageMin) ? ageMin : undefined,
     baselineNote:
-      "占用百分比相对插件配置的上下文窗口基准（contextWindowTokens，默认 1,000,000）；请按所用模型实际窗口在插件设置中调整。",
+      "占用百分比相对生效窗口（contextWindowTokens）。窗口来源 windowSource：config=用户显式配置 > calibrated=压缩事件自动校准 > default=默认值；配置方式见 README。",
+    scopeNote:
+      "计量数据来自最近活跃会话（sessionId/updatedAt）；多窗口并行时其他会话的实时占用不在此列。",
     note: "usedTokens 来自 ZCode 模型 IO 日志的 usage.inputTokens（含缓存读取），是下一轮请求的真实输入规模。",
   };
 }
@@ -154,12 +234,28 @@ const tools = [
       state.nextBlockId += 1;
       state.stats.totalCompressions += 1;
       state.stats.lastCompressionAt = block.createdAt;
+      // 重复主题提示（归一化完全相等；不自动合并，遵 acp-kernel #442 教训）
+      const possibleDuplicates = state.blocks
+        .filter((b) => b.active && b.blockId !== blockId && normTopic(b.topic) === normTopic(block.topic))
+        .map((b) => b.blockId);
+      // 生命周期：超限蒸馏
+      const distilled = enforceMaxBlocks();
       saveBlocks();
-      return {
+      const out = {
         blockId,
         topic: block.topic,
         message: `已归档: ${block.topic} (块 ID: ${blockId})。已持久化，跨会话可用 search_context 检索、decompress 取回。归档不减少当前 token；要立即释放上下文请建议用户执行 /compact。`,
       };
+      if (possibleDuplicates.length > 0) {
+        out.possibleDuplicates = possibleDuplicates;
+        out.message += ` 注意：已存在同主题块（${possibleDuplicates.join(", ")}），如内容重叠请考虑后续合并表述，避免归档膨胀。`;
+      }
+      if (distilled) {
+        const mergedCount = (distilled.summary.match(/^## /gm) || []).length;
+        out.distilled = { blockId: distilled.blockId, mergedCount, topic: distilled.topic };
+        out.message += ` 归档数超上限（${SRV_CFG.max_blocks}），最旧 ${mergedCount} 块已蒸馏合并为 ${distilled.blockId}（Open objectives 逐字保留）。`;
+      }
+      return out;
     },
   },
   {

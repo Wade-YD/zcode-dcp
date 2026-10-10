@@ -1,6 +1,6 @@
 {
   "name": "zcode-dcp",
-  "version": "0.2.2",
+  "version": "0.4.0",
   "private": true,
-  "description": "Dynamic Context Pruning v2 for ZCode - 真实计量上下文占用，达阈值自动提醒，归档旧内容"
+  "description": "Dynamic Context Pruning v4 for ZCode - 三级压缩提醒、压缩检测与窗口校准、会话隔离、按项目隔离的可检索归档与生命周期管理"
 }

@@ -1,5 +1,5 @@
 {
-  "description": "ZCode DCP v2 - 上下文自动计量与压缩提醒 hooks",
+  "description": "ZCode DCP v4 - 上下文自动计量、分级提醒、压缩检测与大工具结果蒸馏提示 hooks",
   "hooks": {
     "SessionStart": [
       {
@@ -19,6 +19,17 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" prompt",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" tool",
             "timeout": 15
           }
         ]

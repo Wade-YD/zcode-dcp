@@ -1,7 +1,7 @@
 {
   "name": "zcode-dcp",
-  "version": "0.3.0",
-  "description": "Dynamic Context Pruning v3 - 真实计量上下文占用，三级阈值自动注入压缩提醒（含承重提示词），归档内容持久化并可检索",
+  "version": "0.4.0",
+  "description": "Dynamic Context Pruning v4 - 三级压缩提醒、压缩检测与窗口校准、会话隔离、按项目隔离的可检索归档与生命周期管理",
   "author": {
     "name": "ZCode DCP"
   },
@@ -25,7 +25,10 @@
         "DCP_CONTEXT_WINDOW_TOKENS": "${user_config.context_window_tokens}",
         "DCP_NUDGE_PERCENT": "${user_config.nudge_percent}",
         "DCP_NUDGE_COOLDOWN_MINUTES": "${user_config.nudge_cooldown_minutes}",
-        "DCP_AUTO_WATCH": "${user_config.auto_watch}"
+        "DCP_AUTO_WATCH": "${user_config.auto_watch}",
+        "DCP_ARCHIVE_SCOPE": "${user_config.archive_scope}",
+        "DCP_MAX_BLOCKS": "${user_config.max_blocks}",
+        "DCP_ABSORB_MIN_TOOL_TOKENS": "${user_config.absorb_min_tool_tokens}"
       }
     }
   },
@@ -59,6 +62,25 @@
       "title": "同级重复提醒的增长步进（tokens）",
       "description": "同层级提醒重复注入需同时满足：冷却时间已过 且 占用增长达到此步进，避免打扰稳定会话",
       "default": 30000
+    },
+    "archive_scope": {
+      "type": "string",
+      "enum": ["project", "global"],
+      "title": "归档作用域",
+      "description": "project=按项目目录隔离归档（推荐，防止项目间上下文漂移）；global=所有项目共享",
+      "default": "project"
+    },
+    "max_blocks": {
+      "type": "number",
+      "title": "归档块数量上限",
+      "description": "超过上限时自动把最旧的约 20% 块蒸馏合并为一个归档块（保留各块的开放目标）",
+      "default": 200
+    },
+    "absorb_min_tool_tokens": {
+      "type": "number",
+      "title": "大工具结果蒸馏提示阈值（tokens）",
+      "description": "工具结果超过此值时提醒模型立即蒸馏归档（absorb-lite）；设为 0 关闭",
+      "default": 8000
     },
     "nudge_cooldown_minutes": {
       "type": "number",
