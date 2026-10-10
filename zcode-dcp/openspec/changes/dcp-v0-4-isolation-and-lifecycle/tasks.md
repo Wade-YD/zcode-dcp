@@ -20,4 +20,4 @@
 ## 4. 交付
 
 - [x] 4.1 版本 0.4.0；README（新配置、absorb-lite 致谢 acp-kernel absorb.ts、压缩检测说明）；两份 marketplace 同步。验证：版本一致
-- [ ] 4.2 冒烟全绿（v03 回归 + v04 新用例）后同步 GitHub 仓库并 push。验证：远端版本 0.4.0
+- [x] 4.2 冒烟全绿（v03 回归 + v04 新用例）后同步 GitHub 仓库并 push。验证：远端版本 0.4.0
