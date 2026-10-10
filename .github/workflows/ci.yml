@@ -16,4 +16,5 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: node tests/run-all.js
+      # 插件本体在 zcode-dcp/ 子目录（仓库根即市场），测试随插件目录走
+      - run: node zcode-dcp/tests/run-all.js
