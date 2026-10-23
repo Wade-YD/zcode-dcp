@@ -12,6 +12,6 @@ description: 显示 DCP 详细压缩统计
 | 真实上下文占用 | ...%（如有计量数据） |
 
 **压缩块列表：**
-列出每个活跃块的 blockId、topic、type、tags 和创建时间。
+列出每个归档块的 blockId、topic、type、tags 和创建时间。
 
 如果没有压缩块，显示"暂无压缩内容"。

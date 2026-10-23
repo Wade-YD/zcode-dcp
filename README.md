@@ -19,7 +19,7 @@ ZCode DCP 是一个 [ZCode](https://zcode.ai) 插件，用于**动态管理对�
 - **absorb-lite（实验性）** — 超大工具结果（默认 ≥8000 tokens）落地时提醒模型立即蒸馏归档，别等 nudge
 - **随时回溯** — `search_context` 按关键词检索归档块（中英文），`decompress` 取回全文，跨会话有效
 
-> 一个诚实的说明：ZCode 插件**无法删除对话历史里的消息**（这是内核能力，任何插件都做不到）。本插件做的是「归档瘦身」——它不会让占用条下降；真正释放 token 的是 ZCode 内置压缩（占用约 83% 时自动触发，或手动 `/compact`）。本插件的价值在于：50% 就开始阻止垃圾内容堆积、把重要信息摘要化，让 83% 那次自动压缩丢的信息更少。
+> 一个诚实的说明：ZCode 插件**无法删除对话历史里的消息**（这是内核能力，任何插件都做不到）。本插件做的是「归档瘦身」——它不会让占用条下降；真正释放 token 的是 ZCode 内置压缩（触发点≈窗口−34K，默认 1M 窗口下约 96.6%，或手动 `/compact`）。本插件的价值在于：50% 就开始阻止垃圾内容堆积、把重要信息摘要化，让内核自动压缩丢的信息更少。
 
 ## 功能
 
@@ -131,7 +131,7 @@ The load-bearing prompt rules (KEEP VERBATIM list, compression priority order, a
 
 ZCode DCP is a [ZCode](https://zcode.ai) plugin for dynamic context management: it meters real context usage every turn (from ZCode's model-IO logs), injects tiered compression nudges at 50/70/80% thresholds, and archives stale content (old search results, resolved errors, duplicate tool calls) into searchable, persistent summaries (`search_context` + `decompress`, surviving restarts). After the kernel's built-in compact rewrites the conversation, DCP injects an archive index into the fresh context (experimental).
 
-**Honest note:** ZCode plugins cannot delete messages from conversation history — only the kernel's built-in compact (~83% auto, or manual `/compact`) actually frees tokens. DCP's value is stopping junk accumulation early and summarizing important info before that compact happens.
+**Honest note:** ZCode plugins cannot delete messages from conversation history — only the kernel's built-in compact (trigger ≈ window − 34K, ~96.6% on the default 1M window, or manual `/compact`) actually frees tokens. DCP's value is stopping junk accumulation early and summarizing important info before that compact happens.
 
 **Install:** clone this repo → Plugin Marketplace → Add → paste the repo root (contains `marketplace.json`) → Install from Personal. Disable the official `zcode-dcp` if you have it.
 

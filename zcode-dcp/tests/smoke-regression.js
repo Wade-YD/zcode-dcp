@@ -54,7 +54,8 @@ const read = (f) => JSON.parse(fs.readFileSync(f, "utf-8"));
   const realUsagePath = path.join(os.homedir(), ".zcode", "dcp", "usage.json");
   if (fs.existsSync(realUsagePath)) {
     const u = read(realUsagePath);
-    check("T0 真实数据计量更新", u.usedTokens > 0 && u.contextWindowTokens === 1000000, JSON.stringify(u).slice(0, 200));
+    // 校准可能改变窗口值（P0 修复后默认配置不再锁死校准），只断言计量在更新
+    check("T0 真实数据计量更新", u.usedTokens > 0 && Number.isFinite(u.contextWindowTokens), JSON.stringify(u).slice(0, 200));
   } else {
     console.log("SKIP T0（本机无真实计量数据）");
   }
@@ -64,7 +65,7 @@ const read = (f) => JSON.parse(fs.readFileSync(f, "utf-8"));
 {
   const p = JSON.parse(fs.readFileSync(path.join(SRC, ".zcode-plugin", "plugin.json"), "utf-8"));
   const cfg = p.userConfig;
-  check("T1 版本 0.5.1", p.version === "0.5.1");
+  check("T1 版本 0.5.2", p.version === "0.5.2");
   check("T1 窗口默认 1M", cfg.context_window_tokens.default === 1000000);
   check("T1 分级配置齐全", cfg.tier2_percent.default === 70 && cfg.tier3_percent.default === 80 && cfg.nudge_growth_tokens.default === 30000);
   check("T1 v0.1 遗留配置已删", !cfg.max_context_tokens && !cfg.nudge_threshold && !cfg.auto_sweep);

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * ZCode DCP v0.4.0 自动上下文计量 / 分级提醒 / 压缩检测 / absorb-lite hook
+ * ZCode DCP 自动上下文计量 / 分级提醒 / 压缩检测 / absorb-lite hook（版本见 plugin.json）
  *
  * 模式（argv[2]，ZCode 可能丢 argv，故按 stdin 的 hook_event_name 兜底推断）:
  *   session-start  会话启动/清空/内核压缩后：工具说明 + 当前占用 + 归档索引（按项目命名空间）
@@ -85,7 +85,9 @@ function applyConfigObject(cfg, val) {
   const pct = (v) => pos(v) && +v <= 100;
   if (pos(val.context_window_tokens)) {
     cfg.context_window_tokens = +val.context_window_tokens;
-    cfg._windowExplicit = true;
+    // ZCode 会把 userConfig 默认值物化进 config.json——值等于默认时视为"未显式配置"，
+    // 让位给窗口校准（真实窗口恰为默认值时校准观测会收敛回同值，自愈无损失）
+    cfg._windowExplicit = cfg._windowExplicit || +val.context_window_tokens !== DEFAULTS.context_window_tokens;
   }
   if (pct(val.nudge_percent)) cfg.nudge_percent = +val.nudge_percent;
   if (pct(val.tier2_percent)) cfg.tier2_percent = +val.tier2_percent;
@@ -308,7 +310,8 @@ function buildArchiveIndexSection(projectDir, scope) {
   const store = readJson(blocksFileFor(projectDir, scope));
   const blocks = Array.isArray(store && store.blocks) ? store.blocks.filter((b) => b && b.blockId) : [];
   if (blocks.length === 0) return "[dcp 归档索引] 暂无归档块。";
-  const lines = blocks.slice(0, 20).map((b) => `${b.blockId}: ${b.topic}`);
+  // 最新在前：召回场景下最相关的是近期归档，而非最旧的
+  const lines = blocks.slice(-20).reverse().map((b) => `${b.blockId}: ${b.topic}`);
   const more = blocks.length > 20 ? `\n…等共 ${blocks.length} 块` : "";
   return [`[dcp 归档索引]（${blocks.length} 块）`, ...lines, more, "细节用 search_context 检索、decompress 取回。"].join("\n");
 }
@@ -348,7 +351,8 @@ function sessionStartText(projectDir, scope) {
   const usage = readJson(USAGE_FILE);
   if (usage && Number.isFinite(usage.usedTokens) && Number.isFinite(usage.contextWindowTokens)) {
     const pct = Math.min(100, (usage.usedTokens / usage.contextWindowTokens) * 100).toFixed(1);
-    parts.push("", `[dcp 状态] 当前上下文占用 ${pct}%（${fmtNum(usage.usedTokens)} / ${fmtNum(usage.contextWindowTokens)} tokens，更新于 ${usage.updatedAt || "未知时间"}）。`);
+    // compact 触发的 SessionStart 读到的仍是压缩前读数，标注滞后防误读
+    parts.push("", `[dcp 状态] 上一轮计量占用 ${pct}%（${fmtNum(usage.usedTokens)} / ${fmtNum(usage.contextWindowTokens)} tokens，更新于 ${usage.updatedAt || "未知时间"}；刚发生压缩时此值滞后一轮）。`);
   }
   if (scope === "global") {
     parts.push("", "[dcp 提示] 归档为全局共享（archive_scope=global），索引可能包含其他项目的路径与信息。");
@@ -369,18 +373,17 @@ function maybeAbsorb(input, cfg, sessionId) {
   const minTokens = cfg.absorb_min_tool_tokens;
   if (!minTokens || minTokens <= 0) return false;
   const resp = input.tool_response;
-  let size = 0;
-  if (typeof resp === "string") size = resp.length;
+  let text = null;
+  if (typeof resp === "string") text = resp;
   else if (resp != null) {
     try {
-      size = JSON.stringify(resp).length;
+      text = JSON.stringify(resp);
     } catch {}
   }
+  if (!text) return false;
+  const size = text.length;
   // CJK 每字≈1 token、ASCII 约 4 字符/token；纯 length/4 对中文低估 4 倍导致 absorb 几乎不触发
-  let cjk = 0;
-  try {
-    cjk = ((typeof resp === "string" ? resp : JSON.stringify(resp)).match(/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/g) || []).length;
-  } catch {}
+  const cjk = (text.match(/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/g) || []).length;
   const tokens = Math.round(cjk + (size - cjk) / 4);
   if (tokens < minTokens) return false;
   const af = absorbFileFor(sessionId);

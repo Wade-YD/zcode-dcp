@@ -1,6 +1,6 @@
 {
   "name": "zcode-dcp",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Dynamic Context Pruning v5 - 三级压缩提醒、压缩检测与窗口校准、会话隔离、按项目隔离的可检索归档与生命周期管理",
   "author": {
     "name": "ZCode DCP"
@@ -17,15 +17,9 @@
       ],
       "cwd": "${ZCODE_PROJECT_DIR}",
       "env": {
-        "DCP_PLUGIN_ROOT": "${ZCODE_PLUGIN_ROOT}",
         "DCP_PROJECT_DIR": "${ZCODE_PROJECT_DIR}",
-        "DCP_CONTEXT_WINDOW_TOKENS": "${user_config.context_window_tokens}",
-        "DCP_NUDGE_PERCENT": "${user_config.nudge_percent}",
-        "DCP_NUDGE_COOLDOWN_MINUTES": "${user_config.nudge_cooldown_minutes}",
-        "DCP_AUTO_WATCH": "${user_config.auto_watch}",
         "DCP_ARCHIVE_SCOPE": "${user_config.archive_scope}",
-        "DCP_MAX_BLOCKS": "${user_config.max_blocks}",
-        "DCP_ABSORB_MIN_TOOL_TOKENS": "${user_config.absorb_min_tool_tokens}"
+        "DCP_MAX_BLOCKS": "${user_config.max_blocks}"
       }
     }
   },
@@ -69,7 +63,7 @@
     "max_blocks": {
       "type": "number",
       "title": "归档块数量上限",
-      "description": "超过上限时自动把最旧的约 20% 块蒸馏合并为一个归档块（保留各块的开放目标）",
+      "description": "超过上限时自动蒸馏合并最旧的块直至恰好回落到上限（保留各块的开放目标）",
       "default": 200
     },
     "absorb_min_tool_tokens": {

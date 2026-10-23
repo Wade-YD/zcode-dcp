@@ -1,9 +1,9 @@
 ---
 name: dcp
-description: Dynamic Context Pruning v2 - 当对话变长、上下文占用达到阈值、token 不足，或用户提到"压缩上下文"、"清理上下文"、"查占用"时触发。真实计量上下文占用，归档不再需要的内容。
+description: Dynamic Context Pruning - 当对话变长、上下文占用达到阈值、token 不足，或用户提到"压缩上下文"、"清理上下文"、"查占用"时触发。真实计量上下文占用，归档不再需要的内容。
 ---
 
-# ZCode DCP v2 (Dynamic Context Pruning)
+# ZCode DCP (Dynamic Context Pruning)
 
 管理对话上下文：**计量真实占用 → 达阈值自动提醒 → 归档旧内容**。
 
@@ -17,7 +17,7 @@ description: Dynamic Context Pruning v2 - 当对话变长、上下文占用达�
 - 已解决的错误不再需要完整错误日志
 - 自动监控提醒上下文超过阈值时
 
-**注意**：归档是把内容记入存档并写摘要，**不减少当前上下文 token**；真正释放发生在 ZCode 内置 compact（约 83% 自动触发，或用户执行 `/compact`）。
+**注意**：归档是把内容记入存档并写摘要，**不减少当前上下文 token**；真正释放发生在 ZCode 内置 compact（触发点≈窗口−34K，默认 1M 窗口下约 96.6%，或用户执行 `/compact`）。
 
 ### mcp__plugin_zcode-dcp_dcp__decompress(blockId)
 查看已归档块的完整内容。
@@ -31,7 +31,7 @@ description: Dynamic Context Pruning v2 - 当对话变长、上下文占用达�
 ### mcp__plugin_zcode-dcp_dcp__context_usage()
 当前真实上下文占用（tokens 与百分比），来自每轮自动计量（hook 读取 ZCode 模型 IO 日志）。
 
-## 自动监控（v2 新增）
+## 自动监控
 
 插件 hook 在每轮（用户发消息时、每轮结束时）自动读取 `~/.zcode/cli/rollout/model-io-sess_<会话ID>.jsonl` 最新一行的 `usage.inputTokens`，写入 `~/.zcode/dcp/usage.json`。占用超过阈值（默认 50%）时自动注入压缩提醒，提醒文本会出现在对话上下文中——看到 `[dcp 自动上下文监控]` 时**立即**执行压缩。
 

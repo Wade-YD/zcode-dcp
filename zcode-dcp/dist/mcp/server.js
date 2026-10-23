@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * ZCode DCP v0.4.0 MCP Server (dependency-free)
+ * ZCode DCP MCP Server (dependency-free)（版本见 plugin.json；头注释不带版本号防漂移）
  *
  * 工具:
  *  compress        归档不再需要的对话内容为摘要（描述内嵌承重提示词，改写自 acp-kernel MIT；超限自动蒸馏、重复主题提示）
@@ -26,7 +26,7 @@ const {
   eachPluginOption,
 } = require("../dcp-common.cjs"); // 相对本文件：dist/mcp → dist/dcp-common.cjs
 
-const SERVER_INFO = { name: "zcode-dcp", version: "0.5.1" };
+const SERVER_INFO = { name: "zcode-dcp", version: "0.5.2" };
 const PROJECT_DIR = String(process.env.DCP_PROJECT_DIR || "");
 
 // ---------- 配置（env > config.json > 默认，遍历与过滤规则在 dcp-common） ----------
@@ -93,7 +93,8 @@ function enforceMaxBlocks() {
   });
   const distilled = {
     blockId: formatBlockId(state.nextBlockId),
-    topic: `蒸馏归档 ${new Date().toISOString().slice(0, 10)}（${oldest.length} 块合并）`,
+    // 嵌块号区间：同日多次蒸馏 topic 不再撞名（撞名会污染 duplicateTopics 洞察）
+    topic: `蒸馏归档 ${oldest[0].blockId}-${oldest[oldest.length - 1].blockId}（${new Date().toISOString().slice(0, 10)}，${oldest.length} 块合并）`,
     summary: sections.join("\n\n"),
     tags: ["distilled"],
     type: "general",
@@ -333,8 +334,10 @@ const tools = [
       return {
         sessionId: "in-session",
         totalBlocks: all.length,
+        // 内存统计自 server 启动起（重启归零）；totalBlocks 为持久化真值
         totalCompressions: state.stats.totalCompressions,
         totalDecompressions: state.stats.totalDecompressions,
+        statsNote: "totalCompressions/totalDecompressions 统计自 server 启动（跨重启不累计）；totalBlocks 持久化",
         lastCompressionAt: state.stats.lastCompressionAt ? formatLocalTime(state.stats.lastCompressionAt) : null,
         insights: {
           duplicateTopics: Object.values(topicCount).filter((n) => n > 1).length,
