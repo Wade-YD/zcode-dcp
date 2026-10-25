@@ -30,6 +30,7 @@ ZCode DCP 是一个 [ZCode](https://zcode.ai) 插件，用于**动态管理对�
 | `search_context(query, limit?)` | 按关键词检索归档块（中英文，多词交集） |
 | `context_usage` / `/dcp-usage` | 当前真实上下文占用（tokens 与百分比，含窗口来源） |
 | `context_stats` / `/dcp-stats` | 压缩统计 + 重复主题/错误块洞察 + 真实占用 |
+| `dcp_reset(mode)` / `/dcp-uninstall` | 列举/清除插件全部本地状态（卸载前清理，purge 不可逆） |
 | 自动监控（hook） | 每轮计量；50/70/80% 三级阈值注入分级提醒；压缩检测与召回；大工具结果蒸馏提示 |
 
 > v0.5 起 `sweep` 工具已移除：其去重职责由 compress 的重复提示覆盖，统计面由 `context_stats` 的 insights 承接。
@@ -46,6 +47,23 @@ ZCode DCP 是一个 [ZCode](https://zcode.ai) 插件，用于**动态管理对�
 **方式二：手动**
 
 把 `zcode-dcp/` 目录完整复制到你自己的插件市场目录即可。
+
+## 卸载与清理
+
+UI 卸载（**设置 → 插件 → zcode-dcp → 卸载**）只移除插件本体，插件的状态数据保留在 `~/.zcode/dcp/`（Windows：`%USERPROFILE%\.zcode\dcp`）：
+
+| 文件 | 内容 | 清除后果 |
+|---|---|---|
+| `blocks*.json` | 归档块（你的压缩知识库） | **永久丢失** |
+| `usage.json` / `compact-stats.json` / `window-calibration.json` | 计量 / 压缩统计 / 窗口校准 | 重新累积 |
+| `nudge-*` / `absorb-*` / `recall-pending-*` | 提醒与冷却状态 | 无损重置 |
+
+两条清理路径：
+
+- **推荐**：卸载前对插件说 `/dcp-uninstall`——先列举残留，确认后清除（不可逆），再按提示到 UI 卸载。
+- **手动**：`Remove-Item -Recurse -Force "$env:USERPROFILE\.zcode\dcp"`（Windows）/ `rm -rf ~/.zcode/dcp`（Linux/macOS）。
+
+注意：卸载后重装时，残留的全局 `blocks.json` 会被种子迁移进新项目命名空间——想彻底重来，卸载前务必清理。只想清空数据保留插件，同样用 `/dcp-uninstall`。
 
 ## 配置
 
@@ -134,6 +152,8 @@ ZCode DCP is a [ZCode](https://zcode.ai) plugin for dynamic context management: 
 **Honest note:** ZCode plugins cannot delete messages from conversation history — only the kernel's built-in compact (trigger ≈ window − 34K, ~96.6% on the default 1M window, or manual `/compact`) actually frees tokens. DCP's value is stopping junk accumulation early and summarizing important info before that compact happens.
 
 **Install:** clone this repo → Plugin Marketplace → Add → paste the repo root (contains `marketplace.json`) → Install from Personal. Disable the official `zcode-dcp` if you have it.
+
+**Uninstall:** the UI uninstall removes only the plugin; state data (archives, metering, calibration) stays in `~/.zcode/dcp`. Say `/dcp-uninstall` first — it lists the residue and, after your confirmation, purges it (irreversible; archives are lost). Manual: `rm -rf ~/.zcode/dcp` (Windows: `Remove-Item -Recurse -Force "$env:USERPROFILE\.zcode\dcp"`). Note a leftover global `blocks.json` re-seeds into new projects on reinstall — clean up before reinstalling if you want a fresh start.
 
 **Verified on** Windows (hook wrapper is `run-hook.cmd`); macOS/Linux users: point `hooks/hooks.json` directly at `node auto-watch.cjs` — PRs welcome.
 

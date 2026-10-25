@@ -116,7 +116,7 @@ reset();
   let badKeys = [];
   for (const [k, v] of Object.entries(m.userConfig)) badKeys.push(...Object.keys(v).filter((pk) => !allowed[pk]).map((pk) => `${k}.${pk}`));
   const envKeys = Object.keys(m.mcpServers.dcp.env);
-  check("T6 版本 0.5.2 + 清单键合法 + env 已裁剪", m.version === "0.5.2" && badKeys.length === 0 && envKeys.length === 3, JSON.stringify({ badKeys, envKeys }));
+  check("T6 版本 0.5.3 + 清单键合法 + env 已裁剪", m.version === "0.5.3" && badKeys.length === 0 && envKeys.length === 3, JSON.stringify({ badKeys, envKeys }));
 }
 
 console.log(`\n==== ${pass} passed, ${fail} failed ====`);

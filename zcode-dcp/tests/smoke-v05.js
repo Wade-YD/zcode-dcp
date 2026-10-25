@@ -46,7 +46,7 @@ fs.mkdirSync(SB_ROLLOUT, { recursive: true });
 {
   const r = rpc([INIT, { jsonrpc: "2.0", id: 2, method: "tools/list" }]);
   const names = r[1].result.tools.map((t) => t.name);
-  check("T2 工具面收缩为五个（无 sweep）", names.length === 5 && !names.includes("sweep"), names.join(","));
+  check("T2 核心五工具在且无 sweep（v0.5.3 起另有 dcp_reset）", ["compress","decompress","search_context","context_stats","context_usage"].every((n) => names.includes(n)) && !names.includes("sweep"), names.join(","));
 }
 
 // ---------- T3 context_stats 洞察（重复主题/错误块） ----------

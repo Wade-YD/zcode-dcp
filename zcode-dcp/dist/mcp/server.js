@@ -17,6 +17,7 @@
 "use strict";
 
 const fs = require("fs");
+const path = require("path");
 const {
   STATE_DIR,
   USAGE_FILE,
@@ -26,7 +27,7 @@ const {
   eachPluginOption,
 } = require("../dcp-common.cjs"); // 相对本文件：dist/mcp → dist/dcp-common.cjs
 
-const SERVER_INFO = { name: "zcode-dcp", version: "0.5.2" };
+const SERVER_INFO = { name: "zcode-dcp", version: "0.5.3" };
 const PROJECT_DIR = String(process.env.DCP_PROJECT_DIR || "");
 
 // ---------- 配置（env > config.json > 默认，遍历与过滤规则在 dcp-common） ----------
@@ -362,6 +363,83 @@ const tools = [
     inputSchema: { type: "object", properties: {} },
     handler() {
       return usagePayload();
+    },
+  },
+  {
+    name: "dcp_reset",
+    description:
+      "卸载/清理支撑：列举或清除插件的全部本地状态（~/.zcode/dcp/：归档块、计量、窗口校准、提醒状态）。mode=list 仅列举（文件名/大小/类别/总量，无副作用）；mode=purge 删除全部状态文件并重置内存归档——【不可逆，归档内容将永久丢失，仅在用户明确要求清理数据或卸载插件时调用，调用前必须已向用户确认】。清除范围严格限定于插件状态目录，不触碰其他任何路径。",
+    inputSchema: {
+      type: "object",
+      properties: {
+        mode: {
+          type: "string",
+          description: "list=仅列举残留；purge=确认后清除全部状态",
+        },
+      },
+      required: ["mode"],
+    },
+    handler(args) {
+      const CATEGORY = (name) => {
+        if (/^blocks(-.*)?\.json$/.test(name)) return "归档块（清除即永久丢失）";
+        if (name === "usage.json") return "上下文计量";
+        if (name === "window-calibration.json") return "窗口校准观测";
+        if (name === "compact-stats.json") return "内核压缩事件统计";
+        if (/^nudge-/.test(name)) return "分级提醒状态";
+        if (/^absorb-/.test(name)) return "absorb 冷却状态";
+        if (/^recall-pending-/.test(name)) return "压缩召回标记";
+        return "其他状态";
+      };
+      if (args.mode === "list") {
+        const files = [];
+        try {
+          for (const f of fs.readdirSync(STATE_DIR)) {
+            const full = path.join(STATE_DIR, f);
+            try {
+              const st = fs.statSync(full);
+              if (!st.isFile()) continue;
+              files.push({ file: f, bytes: st.size, modifiedAt: formatLocalTime(st.mtime.toISOString()), category: CATEGORY(f) });
+            } catch {}
+          }
+        } catch {}
+        const totalBytes = files.reduce((m, f) => m + f.bytes, 0);
+        return {
+          mode: "list",
+          stateDir: STATE_DIR,
+          files,
+          totalFiles: files.length,
+          totalBytes,
+          note: files.length === 0 ? "状态目录为空，无需清理。" : "purge 将删除以上全部文件（不可逆，归档内容永久丢失）。卸载插件本身请随后在 设置 → 插件 中操作。",
+        };
+      }
+      if (args.mode === "purge") {
+        const removed = [];
+        try {
+          for (const f of fs.readdirSync(STATE_DIR)) {
+            const full = path.join(STATE_DIR, f);
+            try {
+              if (fs.statSync(full).isFile()) {
+                fs.rmSync(full, { force: true });
+                removed.push(f);
+              }
+            } catch {}
+          }
+        } catch {}
+        // 内存态归一（归档清空、块号归一；stats 为本进程计数保留）
+        state.blocks = [];
+        state.nextBlockId = 1;
+        return {
+          mode: "purge",
+          stateDir: STATE_DIR,
+          removedFiles: removed,
+          removedCount: removed.length,
+          message:
+            removed.length === 0
+              ? "状态目录已为空，无需清理。"
+              : `已清除 ${removed.length} 个状态文件，归档与校准已重置。如需卸载插件本体：设置 → 插件 → zcode-dcp → 卸载；dev 市场源可在插件市场 → 市场源中移除（可选）。`,
+        };
+      }
+      return { error: 'mode 仅支持 "list" 或 "purge"。' };
     },
   },
 ];
