@@ -27,7 +27,7 @@ const {
   eachPluginOption,
 } = require("../dcp-common.cjs"); // 相对本文件：dist/mcp → dist/dcp-common.cjs
 
-const SERVER_INFO = { name: "zcode-dcp", version: "0.5.3" };
+const SERVER_INFO = { name: "zcode-dcp", version: "0.5.4" };
 const PROJECT_DIR = String(process.env.DCP_PROJECT_DIR || "");
 
 // ---------- 配置（env > config.json > 默认，遍历与过滤规则在 dcp-common） ----------
@@ -57,8 +57,16 @@ const state = {
 };
 
 function loadBlocks() {
-  const raw = readJson(blocksFile());
-  if (!raw || !Array.isArray(raw.blocks)) return;
+  // 先解析路径（blocksFileFor 有种子迁移副作用，不能先 existsSync 再取路径）
+  const file = blocksFile();
+  if (!fs.existsSync(file)) {
+    // 磁盘为准：文件被外部清除（purge/手删）即清空内存——防止同项目其他实例把已删归档复活回磁盘
+    state.blocks = [];
+    state.nextBlockId = 1;
+    return;
+  }
+  const raw = readJson(file);
+  if (!raw || !Array.isArray(raw.blocks)) return; // 损坏：保留内存（无害降级）
   state.blocks = raw.blocks.filter((b) => b && b.blockId);
   const maxExisting = state.blocks.reduce(
     (m, b) => Math.max(m, parseInt(String(b.blockId).slice(1), 10) || 0),
@@ -368,75 +376,123 @@ const tools = [
   {
     name: "dcp_reset",
     description:
-      "卸载/清理支撑：列举或清除插件的全部本地状态（~/.zcode/dcp/：归档块、计量、窗口校准、提醒状态）。mode=list 仅列举（文件名/大小/类别/总量，无副作用）；mode=purge 删除全部状态文件并重置内存归档——【不可逆，归档内容将永久丢失，仅在用户明确要求清理数据或卸载插件时调用，调用前必须已向用户确认】。清除范围严格限定于插件状态目录，不触碰其他任何路径。",
+      "列举或清除插件本地状态（归档块/计量/校准/提醒状态）。mode=list 仅列举无副作用；mode=purge 不可逆删除全部插件状态并重置归档，必须已获用户明确确认且显式传 confirm=true。范围严格限定插件状态目录。",
     inputSchema: {
       type: "object",
       properties: {
         mode: {
           type: "string",
-          description: "list=仅列举残留；purge=确认后清除全部状态",
+          description: "list=仅列举残留；purge=确认后清除全部插件状态",
+        },
+        confirm: {
+          type: "boolean",
+          description: "purge 必须显式传 true（传入前必须已获用户对不可逆删除的明确确认）；list 忽略",
         },
       },
       required: ["mode"],
     },
     handler(args) {
+      // 状态目录若被替换为符号链接/junction，列举或删除都会作用于链接目标——机械护栏，直接拒绝
+      try {
+        if (fs.lstatSync(STATE_DIR).isSymbolicLink()) {
+          return { error: `状态目录是符号链接/junction（${STATE_DIR}），为防越界已拒绝操作，请人工检查该目录。` };
+        }
+      } catch {}
+
+      // 白名单：只有匹配以下模式的文件才是本插件状态（含原子写残留的 .tmp）
+      const OWNED = (name) =>
+        /^blocks(-[0-9a-f]{1,12})?\.json(\.tmp)?$/.test(name) ||
+        /^(usage|window-calibration|compact-stats)\.json(\.tmp)?$/.test(name) ||
+        /^(nudge|absorb|recall-pending)-[A-Za-z0-9_-]{1,64}\.json(\.tmp)?$/.test(name);
       const CATEGORY = (name) => {
-        if (/^blocks(-.*)?\.json$/.test(name)) return "归档块（清除即永久丢失）";
-        if (name === "usage.json") return "上下文计量";
-        if (name === "window-calibration.json") return "窗口校准观测";
-        if (name === "compact-stats.json") return "内核压缩事件统计";
+        if (/^blocks(-[0-9a-f]{1,12})?\.json(\.tmp)?$/.test(name)) return "归档块（清除即永久丢失）";
+        if (name.startsWith("usage.json")) return "上下文计量";
+        if (name.startsWith("window-calibration.json")) return "窗口校准观测";
+        if (name.startsWith("compact-stats.json")) return "内核压缩事件统计";
         if (/^nudge-/.test(name)) return "分级提醒状态";
         if (/^absorb-/.test(name)) return "absorb 冷却状态";
         if (/^recall-pending-/.test(name)) return "压缩召回标记";
-        return "其他状态";
+        return "未识别文件（非插件状态，purge 不会删除）";
       };
+
       if (args.mode === "list") {
         const files = [];
+        let dirMissing = false;
         try {
           for (const f of fs.readdirSync(STATE_DIR)) {
-            const full = path.join(STATE_DIR, f);
             try {
-              const st = fs.statSync(full);
+              const st = fs.statSync(path.join(STATE_DIR, f));
               if (!st.isFile()) continue;
-              files.push({ file: f, bytes: st.size, modifiedAt: formatLocalTime(st.mtime.toISOString()), category: CATEGORY(f) });
+              files.push({ file: f, bytes: st.size, owned: OWNED(f), modifiedAt: formatLocalTime(st.mtime.toISOString()), category: CATEGORY(f) });
             } catch {}
           }
-        } catch {}
+        } catch {
+          dirMissing = true;
+        }
         const totalBytes = files.reduce((m, f) => m + f.bytes, 0);
+        const ownedCount = files.filter((f) => f.owned).length;
         return {
           mode: "list",
           stateDir: STATE_DIR,
           files,
           totalFiles: files.length,
+          ownedFiles: ownedCount,
           totalBytes,
-          note: files.length === 0 ? "状态目录为空，无需清理。" : "purge 将删除以上全部文件（不可逆，归档内容永久丢失）。卸载插件本身请随后在 设置 → 插件 中操作。",
+          note: dirMissing
+            ? "状态目录不存在，无需清理。"
+            : ownedCount === 0
+              ? "无插件状态文件，无需清理。"
+              : `purge 将删除 ${ownedCount} 个插件状态文件（不可逆，归档内容永久丢失；未识别文件会保留）。卸载插件本身请随后在 设置 → 插件 中操作。`,
         };
       }
       if (args.mode === "purge") {
+        if (args.confirm !== true) {
+          return { error: "purge 需要显式传 confirm=true，且传入前必须已获用户对不可逆删除的明确确认。" };
+        }
         const removed = [];
+        const skippedUnknown = [];
         try {
           for (const f of fs.readdirSync(STATE_DIR)) {
             const full = path.join(STATE_DIR, f);
             try {
-              if (fs.statSync(full).isFile()) {
-                fs.rmSync(full, { force: true });
-                removed.push(f);
+              if (!fs.statSync(full).isFile()) continue;
+              if (!OWNED(f)) {
+                skippedUnknown.push(f); // 白名单外文件一律不删
+                continue;
               }
+              fs.rmSync(full, { force: true });
+              removed.push(f);
             } catch {}
           }
+        } catch {}
+        // 事后校验：白名单文件若仍残留（EPERM/EBUSY 等删除失败），如实上报而非谎报成功
+        let remaining = [];
+        try {
+          remaining = fs.readdirSync(STATE_DIR).filter((f) => OWNED(f));
         } catch {}
         // 内存态归一（归档清空、块号归一；stats 为本进程计数保留）
         state.blocks = [];
         state.nextBlockId = 1;
+        if (remaining.length > 0) {
+          return {
+            mode: "purge",
+            stateDir: STATE_DIR,
+            removedFiles: removed,
+            skippedUnknown,
+            remainingFiles: remaining,
+            message: `部分文件删除失败（${remaining.join(", ")} 仍在，归档可能未彻底清空），请重试或手动删除整个状态目录。${skippedUnknown.length ? `另有 ${skippedUnknown.length} 个未识别文件已保留。` : ""}`,
+          };
+        }
         return {
           mode: "purge",
           stateDir: STATE_DIR,
           removedFiles: removed,
+          skippedUnknown,
           removedCount: removed.length,
           message:
             removed.length === 0
-              ? "状态目录已为空，无需清理。"
-              : `已清除 ${removed.length} 个状态文件，归档与校准已重置。如需卸载插件本体：设置 → 插件 → zcode-dcp → 卸载；dev 市场源可在插件市场 → 市场源中移除（可选）。`,
+              ? "无插件状态文件，无需清理。"
+              : `已清除 ${removed.length} 个状态文件，归档与校准已重置（仍在进行的会话会自动重建计量文件，属正常）。如需卸载插件本体：设置 → 插件 → zcode-dcp → 卸载；dev 市场源可在插件市场 → 市场源中移除（可选）。`,
         };
       }
       return { error: 'mode 仅支持 "list" 或 "purge"。' };

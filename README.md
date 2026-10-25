@@ -63,7 +63,7 @@ UI 卸载（**设置 → 插件 → zcode-dcp → 卸载**）只移除插件本�
 - **推荐**：卸载前对插件说 `/dcp-uninstall`——先列举残留，确认后清除（不可逆），再按提示到 UI 卸载。
 - **手动**：`Remove-Item -Recurse -Force "$env:USERPROFILE\.zcode\dcp"`（Windows）/ `rm -rf ~/.zcode/dcp`（Linux/macOS）。
 
-注意：卸载后重装时，残留的全局 `blocks.json` 会被种子迁移进新项目命名空间——想彻底重来，卸载前务必清理。只想清空数据保留插件，同样用 `/dcp-uninstall`。
+注意：卸载后重装时，残留的全局 `blocks.json` 会被种子迁移进新项目命名空间，同路径项目的 `blocks-<哈希>.json` 重装后也会原样恢复——想彻底重来，卸载前务必清理。只想清空数据保留插件，同样用 `/dcp-uninstall`。
 
 ## 配置
 
@@ -128,7 +128,7 @@ hook（auto-watch.cjs）读取
 零依赖，纯 Node.js（无需 `npm install`）。全量冒烟测试（Windows/Linux 均可跑，CI 矩阵自动执行）：
 
 ```bash
-node tests/run-all.js        # 4 个套件：回归 / v0.4 系 / 审查修复 / v0.5
+node tests/run-all.js        # 6 个套件：回归 / v0.4 系 / 审查修复 / v0.5 / 二审 / 卸载清理
 ```
 
 欢迎 PR：跨平台 hook 包装、压缩后召回的端到端实测反馈、更多压缩策略、占用趋势记录、更好看的统计输出……

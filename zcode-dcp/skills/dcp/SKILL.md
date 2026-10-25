@@ -31,6 +31,9 @@ description: Dynamic Context Pruning - 当对话变长、上下文占用达到�
 ### mcp__plugin_zcode-dcp_dcp__context_usage()
 当前真实上下文占用（tokens 与百分比），来自每轮自动计量（hook 读取 ZCode 模型 IO 日志）。
 
+### mcp__plugin_zcode-dcp_dcp__dcp_reset(mode, confirm?)
+卸载/清理支撑：list 列举本地状态残留；purge 不可逆清除全部插件状态（须已获用户确认并传 confirm=true）。用户要求卸载或清空数据时走 `/dcp-uninstall` 命令流程。
+
 ## 自动监控
 
 插件 hook 在每轮（用户发消息时、每轮结束时）自动读取 `~/.zcode/cli/rollout/model-io-sess_<会话ID>.jsonl` 最新一行的 `usage.inputTokens`，写入 `~/.zcode/dcp/usage.json`。占用超过阈值（默认 50%）时自动注入压缩提醒，提醒文本会出现在对话上下文中——看到 `[dcp 自动上下文监控]` 时**立即**执行压缩。

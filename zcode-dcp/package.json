@@ -1,6 +1,6 @@
 {
   "name": "zcode-dcp",
-  "version": "0.5.3",
+  "version": "0.5.4",
   "private": true,
-  "description": "Dynamic Context Pruning for ZCode - 三级压缩提醒、压缩检测与窗口校准、会话隔离、按项目隔离的可检索归档、卸载清理支撑"
+  "description": "Dynamic Context Pruning for ZCode - 三级压缩提醒、压缩检测与窗口校准、会话隔离、按项目隔离的可检索归档、带护栏的卸载清理"
 }

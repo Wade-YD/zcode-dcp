@@ -9,6 +9,7 @@ description: 显示 DCP 状态概览（含真实上下文占用）
    - `/dcp-usage` - 只看真实占用
    - `/dcp-stats` - 详细统计
    - `/dcp-decompress <id>` - 解压指定块
+   - `/dcp-uninstall` - 卸载前清理/清空数据
 
 如果占用已超过阈值，主动建议执行一次 compress 归档旧内容，并说明"归档不减少占用，立即释放可执行 /compact"。
 如果没有压缩块，显示"暂无压缩内容"并提示可以通过 compress 工具主动归档。
