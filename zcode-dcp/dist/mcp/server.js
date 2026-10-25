@@ -27,7 +27,7 @@ const {
   eachPluginOption,
 } = require("../dcp-common.cjs"); // 相对本文件：dist/mcp → dist/dcp-common.cjs
 
-const SERVER_INFO = { name: "zcode-dcp", version: "0.5.4" };
+const SERVER_INFO = { name: "zcode-dcp", version: "0.6.0" };
 const PROJECT_DIR = String(process.env.DCP_PROJECT_DIR || "");
 
 // ---------- 配置（env > config.json > 默认，遍历与过滤规则在 dcp-common） ----------
@@ -399,15 +399,16 @@ const tools = [
         }
       } catch {}
 
-      // 白名单：只有匹配以下模式的文件才是本插件状态（含原子写残留的 .tmp）
+      // 白名单：只有匹配以下模式的文件才是本插件状态（含原子写残留的 .tmp 与按模型分校准的 window-calibration-<model>）
       const OWNED = (name) =>
         /^blocks(-[0-9a-f]{1,12})?\.json(\.tmp)?$/.test(name) ||
-        /^(usage|window-calibration|compact-stats)\.json(\.tmp)?$/.test(name) ||
+        /^(usage|compact-stats)\.json(\.tmp)?$/.test(name) ||
+        /^window-calibration(-[A-Za-z0-9._-]{1,48})?\.json(\.tmp)?$/.test(name) ||
         /^(nudge|absorb|recall-pending)-[A-Za-z0-9_-]{1,64}\.json(\.tmp)?$/.test(name);
       const CATEGORY = (name) => {
         if (/^blocks(-[0-9a-f]{1,12})?\.json(\.tmp)?$/.test(name)) return "归档块（清除即永久丢失）";
         if (name.startsWith("usage.json")) return "上下文计量";
-        if (name.startsWith("window-calibration.json")) return "窗口校准观测";
+        if (/^window-calibration/.test(name)) return "窗口校准观测";
         if (name.startsWith("compact-stats.json")) return "内核压缩事件统计";
         if (/^nudge-/.test(name)) return "分级提醒状态";
         if (/^absorb-/.test(name)) return "absorb 冷却状态";

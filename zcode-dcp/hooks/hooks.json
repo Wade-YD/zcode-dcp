@@ -1,5 +1,5 @@
 {
-  "description": "ZCode DCP v4 - 上下文自动计量、分级提醒、压缩检测与大工具结果蒸馏提示 hooks",
+  "description": "ZCode DCP - 上下文自动计量、分级提醒、压缩检测与大工具结果蒸馏提示 hooks（node 直调，跨平台）",
   "hooks": {
     "SessionStart": [
       {
@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" session-start",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/auto-watch.cjs\" session-start",
             "timeout": 15
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" prompt",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/auto-watch.cjs\" prompt",
             "timeout": 15
           }
         ]
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" tool",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/auto-watch.cjs\" tool",
             "timeout": 15
           }
         ]
@@ -40,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.cmd\" stop",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/auto-watch.cjs\" stop",
             "timeout": 15
           }
         ]

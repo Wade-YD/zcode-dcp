@@ -3,7 +3,7 @@
 const { execFileSync } = require("child_process");
 const path = require("path");
 
-const suites = ["smoke-regression.js", "smoke-v04.js", "smoke-v041.js", "smoke-v05.js", "smoke-v052.js", "smoke-v053.js"];
+const suites = ["smoke-regression.js", "smoke-v04.js", "smoke-v041.js", "smoke-v05.js", "smoke-v052.js", "smoke-v053.js", "smoke-v06.js"];
 let failed = 0;
 
 for (const t of suites) {

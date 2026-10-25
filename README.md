@@ -114,11 +114,10 @@ hook（auto-watch.cjs）读取
 
 ## 已验证环境与已知限制
 
-- ✅ Windows + ZCode 桌面版 + Git Bash + Node.js（hook 包装脚本为 `run-hook.cmd`）
-- ⚠️ **macOS / Linux**：把 `hooks/hooks.json` 里的命令换成直接调用 `node auto-watch.cjs`（或写一个 `.sh` 包装）即可，欢迎 PR
+- ✅ Windows / macOS / Linux（hooks 以 `node` 直调，零平台依赖；CI 于 Windows/Ubuntu 双矩阵验证）
 - ⚠️ 上下文占用来自上一轮模型请求的 `inputTokens`，是「本轮开始时」的准确值；一轮内大量工具调用造成的增长要等下一轮才可见
 - ⚠️ 归档不减少当前 token（见上文说明）
-- ⚠️ **压缩检测为启发式**：用量骤降 ≥40% 且前后属同一会话才判定压缩——会话回退/换模型/切换窗口不会误报；窗口校准只采"窗口后 40% 区间"的压缩（低水位手动 /compact 不污染校准）
+- ⚠️ **压缩检测为启发式**：用量骤降 ≥40% 且前后属同一会话、同一模型才判定压缩——会话回退/换模型/切换窗口不会误报；窗口校准按模型分文件累积，只采"窗口后 40% 区间"的压缩（低水位手动 /compact 不污染校准）
 - ⚠️ **absorb-lite（实验性）**：仅注入蒸馏提示，无法隐藏原始工具结果（内核独占）；token 估算 CJK 感知（中文每字≈1 token），有阈值与会话级 10 分钟冷却双重限流，`absorb_min_tool_tokens=0` 可关闭
 - ⚠️ 同项目多窗口并行时，归档写入仍存在极小的 last-writer-wins 竞态窗口（已通过变更前重读显著缩小）；如遇极端并发可临时切换 `archive_scope=global` 观察
 - ⚠️ `archive_scope=global` 时归档跨项目共享，session-start 会把其他项目的主题行注入当前会话——含敏感路径的项目请保持默认 project
@@ -128,10 +127,10 @@ hook（auto-watch.cjs）读取
 零依赖，纯 Node.js（无需 `npm install`）。全量冒烟测试（Windows/Linux 均可跑，CI 矩阵自动执行）：
 
 ```bash
-node tests/run-all.js        # 6 个套件：回归 / v0.4 系 / 审查修复 / v0.5 / 二审 / 卸载清理
+node tests/run-all.js        # 7 个套件：回归 / v0.4 系 / 审查修复 / v0.5 / 二审 / 卸载清理 / 模型隔离
 ```
 
-欢迎 PR：跨平台 hook 包装、压缩后召回的端到端实测反馈、更多压缩策略、占用趋势记录、更好看的统计输出……
+欢迎 PR：压缩后召回的端到端实测反馈、更多压缩策略、占用趋势记录、更好看的统计输出……
 
 ## 致谢（Acknowledgements）
 
@@ -155,6 +154,6 @@ ZCode DCP is a [ZCode](https://zcode.ai) plugin for dynamic context management: 
 
 **Uninstall:** the UI uninstall removes only the plugin; state data (archives, metering, calibration) stays in `~/.zcode/dcp`. Say `/dcp-uninstall` first — it lists the residue and, after your confirmation, purges it (irreversible; archives are lost). Manual: `rm -rf ~/.zcode/dcp` (Windows: `Remove-Item -Recurse -Force "$env:USERPROFILE\.zcode\dcp"`). Note a leftover global `blocks.json` re-seeds into new projects on reinstall — clean up before reinstalling if you want a fresh start.
 
-**Verified on** Windows (hook wrapper is `run-hook.cmd`); macOS/Linux users: point `hooks/hooks.json` directly at `node auto-watch.cjs` — PRs welcome.
+**Verified on** Windows and Ubuntu (CI matrix); hooks invoke `node` directly with no platform wrapper.
 
 Licensed under MIT.

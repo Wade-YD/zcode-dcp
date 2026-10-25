@@ -102,19 +102,27 @@ function applyConfigObject(cfg, val) {
     cfg.absorb_min_tool_tokens = +val.absorb_min_tool_tokens;
 }
 
-// ---------- 窗口校准 ----------
+// ---------- 窗口校准（按模型隔离：观测写 window-calibration-<slug>.json；无专属观测回退旧全局文件） ----------
 
-function recordCalibration(preTokens) {
+const modelSlug = (modelId) =>
+  modelId ? String(modelId).replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 48) : "default";
+const calibrationFileFor = (modelId) =>
+  modelId
+    ? path.join(STATE_DIR, `window-calibration-${modelSlug(modelId)}.json`)
+    : CALIBRATION_FILE;
+
+function recordCalibration(preTokens, modelId) {
   const observed = preTokens + KERNEL_COMPACT_RESERVE;
-  const cal = readJson(CALIBRATION_FILE) || { observations: [] };
+  const file = calibrationFileFor(modelId);
+  const cal = readJson(file) || { observations: [] };
   if (!Array.isArray(cal.observations)) cal.observations = [];
-  cal.observations.push({ observedWindow: observed, at: new Date().toISOString() });
+  cal.observations.push({ observedWindow: observed, at: new Date().toISOString(), model: modelId || null });
   cal.observations = cal.observations.slice(-5);
-  writeJson(CALIBRATION_FILE, cal);
+  writeJson(file, cal);
 }
 
-function calibratedWindow() {
-  const cal = readJson(CALIBRATION_FILE);
+function medianOfObs(file) {
+  const cal = readJson(file);
   const obs = Array.isArray(cal && cal.observations) ? cal.observations.map((o) => +o.observedWindow).filter(Number.isFinite) : [];
   if (obs.length < 2) return null;
   obs.sort((a, b) => a - b);
@@ -122,9 +130,17 @@ function calibratedWindow() {
   return obs.length % 2 ? obs[mid] : Math.round((obs[mid - 1] + obs[mid]) / 2);
 }
 
-function effectiveWindow(cfg) {
+function calibratedWindow(modelId) {
+  if (modelId) {
+    const own = medianOfObs(calibrationFileFor(modelId));
+    if (own !== null) return own;
+  }
+  return medianOfObs(CALIBRATION_FILE); // 模型无专属观测：回退旧全局观测（平滑迁移）
+}
+
+function effectiveWindow(cfg, modelId) {
   if (cfg._windowExplicit) return { window: cfg.context_window_tokens, source: "config" };
-  const cal = calibratedWindow();
+  const cal = calibratedWindow(modelId);
   if (cal) return { window: cal, source: "calibrated" };
   return { window: cfg.context_window_tokens, source: "default" };
 }
@@ -194,7 +210,9 @@ function readLatestUsage(sessionId) {
         const u = rec.usage || (rec.response && rec.response.usage) || null;
         const used = u ? (u.inputTokens ?? u.input_tokens ?? u.totalTokens ?? u.total_tokens) : null;
         if (Number.isFinite(used) && used > 0) {
-          return { usedTokens: used, totalTokens: u.totalTokens ?? u.total_tokens ?? null };
+          const m = rec.model || (rec.request && rec.request.body && rec.request.body.model) || null;
+          const modelId = m ? (m.modelId ?? m) : null;
+          return { usedTokens: used, totalTokens: u.totalTokens ?? u.total_tokens ?? null, modelId: typeof modelId === "string" ? modelId : null };
         }
       } catch {}
     }
@@ -203,8 +221,8 @@ function readLatestUsage(sessionId) {
 }
 
 // ---------- 计量写盘 + 骤降压缩检测 ----------
-function writeUsage(sessionId, eventName, used, total, cfg) {
-  const win = effectiveWindow(cfg);
+function writeUsage(sessionId, eventName, used, total, cfg, modelId) {
+  const win = effectiveWindow(cfg, modelId);
   const pct = Math.min(100, (used / win.window) * 100);
   writeJson(USAGE_FILE, {
     usedTokens: used,
@@ -216,6 +234,7 @@ function writeUsage(sessionId, eventName, used, total, cfg) {
     tier2Percent: cfg.tier2_percent,
     tier3Percent: cfg.tier3_percent,
     sessionId: sessionId || null,
+    modelId: modelId || null,
     scopeNote: "最近活跃会话",
     event: eventName,
     updatedAt: new Date().toISOString(),
@@ -223,11 +242,13 @@ function writeUsage(sessionId, eventName, used, total, cfg) {
   return { pct, win };
 }
 
-function detectCompact(sessionId, used, prevUsage, cfg) {
+function detectCompact(sessionId, used, prevUsage, cfg, modelId) {
   const prevUsed = prevUsage && Number.isFinite(prevUsage.usedTokens) ? prevUsage.usedTokens : null;
   if (!prevUsed || prevUsed < 20000) return null;
   // 前值必须属于同一会话：跨会话的"骤降"只是切换了窗口，不是压缩（否则会伪造召回并污染窗口校准）
   if (!prevUsage || prevUsage.sessionId !== (sessionId || null)) return null;
+  // 前值还必须是同一模型：换模型瞬间的 used 骤降是窗口切换不是压缩，且旧模型的量不能采进新模型的校准
+  if ((prevUsage.modelId || null) !== (modelId || null)) return null;
   if (used >= prevUsed * 0.6) return null;
   const event = {
     at: new Date().toISOString(),
@@ -235,6 +256,7 @@ function detectCompact(sessionId, used, prevUsage, cfg) {
     postTokens: used,
     saved: prevUsed - used,
     sessionId: sessionId || null,
+    modelId: modelId || null,
   };
   const stats = readJson(COMPACT_STATS_FILE) || { events: [] };
   if (!Array.isArray(stats.events)) stats.events = [];
@@ -242,8 +264,8 @@ function detectCompact(sessionId, used, prevUsage, cfg) {
   stats.events = stats.events.slice(-20);
   writeJson(COMPACT_STATS_FILE, stats);
   // 校准只采"窗口后 40% 区间"的压缩（符合内核触发点特征）；低水位压缩多为手动 /compact，会砸穿校准
-  const win = effectiveWindow(cfg);
-  if (prevUsed >= win.window * 0.6) recordCalibration(prevUsed);
+  const win = effectiveWindow(cfg, modelId);
+  if (prevUsed >= win.window * 0.6) recordCalibration(prevUsed, modelId);
   try {
     fs.rmSync(nudgeFileFor(sessionId), { force: true }); // 压缩后重置该会话提醒层级
   } catch {}
@@ -317,14 +339,15 @@ function buildArchiveIndexSection(projectDir, scope) {
 }
 
 function buildCompactRecapText(event, projectDir, scope, cfg) {
-  const win = effectiveWindow(cfg);
   const parts = [
     `[dcp 压缩召回] 检测到上下文被压缩（${fmtNum(event.preTokens)} → ${fmtNum(event.postTokens)} tokens，释放 ${fmtNum(event.saved)}）。历史细节已折叠，归档索引如下：`,
     buildArchiveIndexSection(projectDir, scope),
   ];
   const usage = readJson(USAGE_FILE);
   if (usage && Number.isFinite(usage.usedTokens)) {
-    parts.push(`[dcp 状态] 当前占用 ${((usage.usedTokens / win.window) * 100).toFixed(1)}%（${fmtNum(usage.usedTokens)} / ${fmtNum(win.window)} tokens）。`);
+    // 直接用写盘时的窗口/百分比，与 usage.json 天然一致（模型专属校准窗口不必在此重算）
+    const win2 = Number.isFinite(usage.contextWindowTokens) ? usage.contextWindowTokens : effectiveWindow(cfg, usage.modelId).window;
+    parts.push(`[dcp 状态] 当前占用 ${((usage.usedTokens / win2) * 100).toFixed(1)}%（${fmtNum(usage.usedTokens)} / ${fmtNum(win2)} tokens）。`);
   }
   return parts.join("\n");
 }
@@ -438,10 +461,10 @@ function main(input, mode) {
   if (!usage) return;
 
   const prevUsage = readJson(USAGE_FILE); // 必须在 writeUsage 覆写前取前值
-  writeUsage(sessionId, eventName, usage.usedTokens, usage.totalTokens, cfg);
+  writeUsage(sessionId, eventName, usage.usedTokens, usage.totalTokens, cfg, usage.modelId);
 
   // 骤降 → 压缩检出：写召回标记；prompt 轮直接注入，stop 轮留给下一轮消费
-  const compactEvent = detectCompact(sessionId, usage.usedTokens, prevUsage, cfg);
+  const compactEvent = detectCompact(sessionId, usage.usedTokens, prevUsage, cfg, usage.modelId);
   if (compactEvent) {
     writeJson(recallFileFor(sessionId), { event: compactEvent });
     if (mode === "prompt") {
@@ -462,7 +485,7 @@ function main(input, mode) {
     return;
   }
 
-  const win = effectiveWindow(cfg);
+  const win = effectiveWindow(cfg, usage.modelId);
   const pctOfWin = Math.min(100, (usage.usedTokens / win.window) * 100);
   const tier = pctOfWin >= cfg.tier3_percent ? 3 : pctOfWin >= cfg.tier2_percent ? 2 : pctOfWin >= cfg.nudge_percent ? 1 : 0;
   if (tier === 0) return;
