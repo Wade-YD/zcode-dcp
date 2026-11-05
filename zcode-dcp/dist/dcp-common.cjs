@@ -17,6 +17,7 @@ const STATE_DIR = path.join(HOME, ".zcode", "dcp");
 const ROLLOUT_DIR = path.join(HOME, ".zcode", "cli", "rollout");
 const USAGE_FILE = path.join(STATE_DIR, "usage.json");
 const BLOCKS_LEGACY_FILE = path.join(STATE_DIR, "blocks.json");
+const DEBUG_LOG_FILE = path.join(STATE_DIR, "dcp-debug.log");
 
 // 内核压缩触发点 ≈ 窗口 − 34K（逆向 zcode.cjs：窗口 − 21K 输出预留 − 13K buffer）
 const KERNEL_COMPACT_RESERVE = 34000;
@@ -45,6 +46,19 @@ function writeJson(file, obj) {
   } catch {}
 }
 
+// 调试日志：JSON lines 追加；>512KB 先轮转为 .1（只留一代）；任何失败静默，绝不影响主流程
+function appendDebugLog(record) {
+  try {
+    let st = null;
+    try { st = fs.statSync(DEBUG_LOG_FILE); } catch {}
+    if (st && st.size > 512 * 1024) {
+      try { fs.renameSync(DEBUG_LOG_FILE, DEBUG_LOG_FILE + ".1"); } catch {} // .1 被占用等轮转失败：静默继续追加
+    }
+    try { fs.mkdirSync(STATE_DIR, { recursive: true }); } catch {}
+    fs.appendFileSync(DEBUG_LOG_FILE, JSON.stringify({ ts: new Date().toISOString(), ...record }) + "\n");
+  } catch {}
+}
+
 function sanitizeSid(sid) {
   return String(sid || "").replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 64) || "unknown";
 }
@@ -64,11 +78,16 @@ function projectHash(projectDir) {
   return crypto.createHash("sha256").update(d).digest("hex").slice(0, 12);
 }
 
+// 纯路径解析（无副作用）：project scope 按项目哈希分文件，否则旧全局文件——体检等只读方用这个
+function blocksPathFor(projectDir, scope) {
+  if (scope !== "project" || !projectDir) return BLOCKS_LEGACY_FILE;
+  return path.join(STATE_DIR, `blocks-${projectHash(projectDir)}.json`);
+}
+
 // 归档命名空间：project scope 按项目哈希分文件；目标文件缺失时从旧全局文件一次性种子迁移
 function blocksFileFor(projectDir, scope) {
-  if (scope !== "project" || !projectDir) return BLOCKS_LEGACY_FILE;
-  const f = path.join(STATE_DIR, `blocks-${projectHash(projectDir)}.json`);
-  if (!fs.existsSync(f)) {
+  const f = blocksPathFor(projectDir, scope);
+  if (scope === "project" && projectDir && !fs.existsSync(f)) {
     const legacy = readJson(BLOCKS_LEGACY_FILE);
     if (legacy && Array.isArray(legacy.blocks)) writeJson(f, legacy);
   }
@@ -96,12 +115,15 @@ module.exports = {
   ROLLOUT_DIR,
   USAGE_FILE,
   BLOCKS_LEGACY_FILE,
+  DEBUG_LOG_FILE,
   KERNEL_COMPACT_RESERVE,
   readJson,
   writeJson,
+  appendDebugLog,
   sanitizeSid,
   normalizeProjectDir,
   projectHash,
+  blocksPathFor,
   blocksFileFor,
   eachPluginOption,
 };

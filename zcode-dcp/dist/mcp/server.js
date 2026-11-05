@@ -6,9 +6,10 @@
  *  compress        归档不再需要的对话内容为摘要（描述内嵌承重提示词，改写自 acp-kernel MIT；超限自动蒸馏、重复主题提示）
  *  decompress      查看已归档块
  *  search_context  按关键词检索归档块（中英文，多词交集；project scope 下仅限本项目）
- *  context_stats   归档统计 + 真实上下文占用（hook 写入的 usage.json）
- *  context_usage   当前真实上下文占用
- *  sweep           （v0.5 已移除——去重由 compress 的 possibleDuplicates 覆盖，统计见 context_stats.insights）
+ *  context_stats   归档统计 + 真实上下文占用 + 压缩节省账本（hook 写入的 usage.json / compact-stats.json）
+ *  context_usage   当前真实上下文占用（含占用趋势环 trend）
+ *  dcp_doctor      插件健康体检（纯只读）：状态目录/配置/阈值/计量链路/归档/统计/校准/会话状态/调试日志/hook 形态
+ *  dcp_reset       列举/清除插件本地状态（list/purge，purge 须 confirm=true）
  *
  * 协议: MCP stdio（按行分隔的 JSON-RPC 2.0），无第三方依赖。
  * 持久化: 归档块存 ~/.zcode/dcp/blocks[-<项目哈希>].json（archive_scope=project 默认按项目隔离，旧全局文件种子迁移）。
@@ -21,14 +22,19 @@ const path = require("path");
 const {
   STATE_DIR,
   USAGE_FILE,
+  HOME,
+  ROLLOUT_DIR,
+  DEBUG_LOG_FILE,
   readJson,
   writeJson,
   blocksFileFor,
+  blocksPathFor,
   eachPluginOption,
 } = require("../dcp-common.cjs"); // 相对本文件：dist/mcp → dist/dcp-common.cjs
 
-const SERVER_INFO = { name: "zcode-dcp", version: "0.6.0" };
+const SERVER_INFO = { name: "zcode-dcp", version: "0.7.0" };
 const PROJECT_DIR = String(process.env.DCP_PROJECT_DIR || "");
+const COMPACT_STATS_FILE = path.join(STATE_DIR, "compact-stats.json");
 
 // ---------- 配置（env > config.json > 默认，遍历与过滤规则在 dcp-common） ----------
 function loadServerConfig() {
@@ -56,9 +62,10 @@ const state = {
   stats: { totalCompressions: 0, totalDecompressions: 0, lastCompressionAt: null },
 };
 
-function loadBlocks() {
-  // 先解析路径（blocksFileFor 有种子迁移副作用，不能先 existsSync 再取路径）
-  const file = blocksFile();
+function loadBlocks(migrate) {
+  // blocksFileFor 有种子迁移副作用（写盘）——默认启用（归档操作路径保证旧归档先迁移再写入）；
+  // 启动初始化等只读方显式传 false 用纯路径解析，保证"启动不写盘"
+  const file = migrate === false ? blocksPathFor(PROJECT_DIR, SRV_CFG.archive_scope) : blocksFile();
   if (!fs.existsSync(file)) {
     // 磁盘为准：文件被外部清除（purge/手删）即清空内存——防止同项目其他实例把已删归档复活回磁盘
     state.blocks = [];
@@ -153,6 +160,20 @@ function usagePayload() {
     };
   }
   const ageMin = Math.round((Date.now() - new Date(u.updatedAt).getTime()) / 60000);
+  // 占用趋势环（v0.7.0 起 hook 在 usage.json 内嵌 history；旧文件无该字段 → 不返回 trend，不报错）
+  let trend;
+  const hist = Array.isArray(u.history) ? u.history : null;
+  if (hist && hist.length >= 2) {
+    const pts = hist.slice(-20).map((p) => ({ t: p.t, used: p.used, pct: p.pct, modelId: p.modelId || null }));
+    const recent = hist.slice(-10);
+    const growth = Math.round((recent[recent.length - 1].used - recent[0].used) / Math.max(1, recent.length - 1));
+    let turnsToTier3;
+    if (growth > 0 && Number.isFinite(u.contextWindowTokens)) {
+      const t3 = Number.isFinite(u.tier3Percent) ? u.tier3Percent : 80;
+      turnsToTier3 = Math.max(0, Math.ceil((u.contextWindowTokens * (t3 / 100) - recent[recent.length - 1].used) / growth));
+    }
+    trend = { points: pts, avgGrowthTokensPerTurn: growth, turnsToTier3, note: "按最近趋势线性外推，仅供参考；增长放缓或压缩后估计随之变化。" };
+  }
   return {
     available: true,
     usedTokens: u.usedTokens,
@@ -166,11 +187,294 @@ function usagePayload() {
     sessionId: u.sessionId,
     updatedAt: u.updatedAt,
     ageMinutes: Number.isFinite(ageMin) ? ageMin : undefined,
+    ...(trend ? { trend } : {}),
     baselineNote:
       "占用百分比相对生效窗口（contextWindowTokens）。窗口来源 windowSource：config=用户显式配置 > calibrated=压缩事件自动校准 > default=默认值；配置方式见 README。",
     scopeNote:
       "计量数据来自最近活跃会话（sessionId/updatedAt）；多窗口并行时其他会话的实时占用不在此列。",
     note: "usedTokens 来自 ZCode 模型 IO 日志的 usage.inputTokens（含缓存读取），是下一轮请求的真实输入规模。",
+  };
+}
+
+// ---------- 健康体检（纯只读，逐项检查；任何单项异常只降级该检查，不影响其余） ----------
+function doctorReport() {
+  const checks = [];
+  const add = (id, status, detail) => checks.push({ id, status, detail });
+  const skip = (id, detail) => checks.push({ id, status: "skipped", detail });
+
+  // 阈值收集（thresholds 与 default_window 共用；config.json 缺失/坏时回落默认值）
+  const th = { nudge_percent: 50, tier2_percent: 70, tier3_percent: 80, context_window_tokens: 1000000, max_blocks: 200, archive_scope: "project" };
+  try {
+    eachPluginOption((val) => {
+      const pos = (v) => Number.isFinite(+v) && +v > 0;
+      const pct = (v) => pos(v) && +v <= 100;
+      if (pct(val.nudge_percent)) th.nudge_percent = +val.nudge_percent;
+      if (pct(val.tier2_percent)) th.tier2_percent = +val.tier2_percent;
+      if (pct(val.tier3_percent)) th.tier3_percent = +val.tier3_percent;
+      if (pos(val.context_window_tokens)) th.context_window_tokens = +val.context_window_tokens;
+      if (pos(val.max_blocks)) th.max_blocks = +val.max_blocks;
+      if (val.archive_scope === "project" || val.archive_scope === "global") th.archive_scope = val.archive_scope;
+    });
+  } catch {}
+
+  // 1. 状态目录：存在且可写（accessSync 只查只读属性，不校验 ACL/杀软拦截）
+  let dirOk = false;
+  try {
+    const st = fs.statSync(STATE_DIR);
+    if (!st.isDirectory()) {
+      add("state_dir", "fail", "状态路径存在但不是目录: " + STATE_DIR);
+    } else {
+      try {
+        fs.accessSync(STATE_DIR, fs.constants.W_OK);
+        dirOk = true;
+        add("state_dir", "ok", "状态目录存在且可写: " + STATE_DIR + "（注：accessSync 只检查只读属性，不查 ACL/杀软拦截）");
+      } catch {
+        add("state_dir", "fail", "状态目录存在但不可写（计量/归档都会失败）: " + STATE_DIR);
+      }
+    }
+  } catch {
+    add("state_dir", "warn", "状态目录不存在（刚安装属正常，hook 首轮计量会自动创建；若已使用过仍缺失，请检查插件 hook 是否被批准启用）: " + STATE_DIR);
+  }
+  if (!dirOk) {
+    skip("default_window", "状态目录缺失");
+    skip("metering", "状态目录缺失");
+    skip("blocks", "状态目录缺失");
+    skip("compact_stats", "状态目录缺失");
+    skip("calibration", "状态目录缺失");
+    skip("stale_sessions", "状态目录缺失");
+  }
+
+  // 2. 配置通道：config.json 是否可解析（userConfig 到达插件 hook 的唯一正式通道）
+  try {
+    const cfgPath = path.join(HOME, ".zcode", "cli", "config.json");
+    if (!fs.existsSync(cfgPath)) {
+      add("config_channel", "ok", "config.json 不存在，全部使用默认值");
+    } else {
+      let parsed = null;
+      try { parsed = JSON.parse(fs.readFileSync(cfgPath, "utf-8")); } catch {}
+      if (!parsed) {
+        add("config_channel", "warn", "config.json 不可解析——配置通道失效，userConfig 全部未生效（可备份后重置该文件）: " + cfgPath);
+      } else {
+        add("config_channel", "ok", "config.json 可解析，插件选项读取正常: " + cfgPath);
+      }
+    }
+  } catch (e) {
+    add("config_channel", "fail", "读取 config.json 异常: " + (e && e.message));
+  }
+
+  // 3. 阈值：tier 须严格递增，窗口/上限须合法（不含 DCP_* 环境变量覆盖）
+  try {
+    if (!(th.nudge_percent < th.tier2_percent && th.tier2_percent < th.tier3_percent)) {
+      add("thresholds", "fail", `阈值须严格递增（不含 DCP_* 环境变量覆盖）：nudge=${th.nudge_percent}% tier2=${th.tier2_percent}% tier3=${th.tier3_percent}%——请在插件设置改回严格递增`);
+    } else if (th.context_window_tokens <= 0 || th.max_blocks < 1) {
+      add("thresholds", "fail", `context_window_tokens（${th.context_window_tokens}）须 >0，max_blocks（${th.max_blocks}）须 ≥1`);
+    } else {
+      add("thresholds", "ok", `nudge=${th.nudge_percent}% tier2=${th.tier2_percent}% tier3=${th.tier3_percent}% 窗口=${th.context_window_tokens} 上限=${th.max_blocks} scope=${th.archive_scope}`);
+    }
+  } catch (e) {
+    add("thresholds", "fail", "阈值检查异常: " + (e && e.message));
+  }
+
+  // 4. 默认窗口风险：窗口仍是默认值且占用已过 tier1 → 提醒会严重迟到（v0.5.2 教训）
+  if (dirOk) {
+    try {
+      const u = readUsage();
+      if (!u) {
+        skip("default_window", "无计量数据");
+      } else if (u.windowSource === "default" && Number.isFinite(u.usedPercent) && u.usedPercent >= th.nudge_percent) {
+        add(
+          "default_window",
+          "warn",
+          `窗口仍为默认值 ${th.context_window_tokens}（windowSource=default）且占用 ${u.usedPercent}% 已过 tier1 阈值——真实窗口可能小得多，提醒会比预期晚得多甚至从不触发（v0.5.2 教训：按默认 1M 估算在真实小窗口模型上会漏报）。建议在插件设置显式配置 context_window_tokens，或等一次压缩后自动校准`
+        );
+      } else {
+        add("default_window", "ok", `windowSource=${u.windowSource || "未知"}，usedPercent=${u.usedPercent}%`);
+      }
+    } catch (e) {
+      add("default_window", "fail", "检查异常: " + (e && e.message));
+    }
+  }
+
+  // 5. 计量链路：usage.json 新鲜度 vs 模型 IO 日志新鲜度
+  if (dirOk) {
+    try {
+      const u = readUsage();
+      if (!u) {
+        add("metering", "warn", "usage.json 不存在或损坏——hook 计量从未成功写盘，请检查插件 hook 是否被批准启用（设置 → 插件 → zcode-dcp）");
+      } else {
+        let newest = null;
+        let newestM = -1;
+        try {
+          for (const f of fs.readdirSync(ROLLOUT_DIR)) {
+            if (!/^model-io-sess_.*\.jsonl$/.test(f)) continue;
+            const m = fs.statSync(path.join(ROLLOUT_DIR, f)).mtimeMs;
+            if (m > newestM) {
+              newestM = m;
+              newest = f;
+            }
+          }
+        } catch {}
+        const usageM = fs.statSync(USAGE_FILE).mtimeMs;
+        if (newest === null) {
+          add("metering", "warn", "未找到模型 IO 日志（~/.zcode/cli/rollout/model-io-sess_*.jsonl）——计量链路无输入，请确认 ZCode 正常运行并写日志");
+        } else if (newestM - usageM > 10 * 60000) {
+          add("metering", "warn", `hook 可能未运行/未批准启用，计量已停更：最新模型 IO 日志（${newest}）比 usage.json 新 ${Math.round((newestM - usageM) / 60000)} 分钟`);
+        } else {
+          const ageMin = Math.round((Date.now() - new Date(u.updatedAt).getTime()) / 60000);
+          if (Number.isFinite(ageMin) && ageMin > 30) {
+            add("metering", "ok", `当前无活跃会话：计量更新于 ${ageMin} 分钟前（windowSource=${u.windowSource}，modelId=${u.modelId ?? null}）`);
+          } else {
+            add("metering", "ok", `计量链路正常：usage 更新于 ${Number.isFinite(ageMin) ? ageMin + " 分钟前" : "未知时间"}，windowSource=${u.windowSource}，modelId=${u.modelId ?? null}`);
+          }
+        }
+      }
+    } catch (e) {
+      add("metering", "fail", "检查异常: " + (e && e.message));
+    }
+  }
+
+  // 6. 归档：存在性 / 可解析性 / 块号自愈状态（blocksPathFor 纯路径解析，无种子迁移副作用，兑现"纯只读"）
+  if (dirOk) {
+    try {
+      const file = blocksPathFor(PROJECT_DIR, SRV_CFG.archive_scope);
+      if (!fs.existsSync(file)) {
+        add("blocks", "ok", "本项目暂无归档文件（正常）: " + file);
+      } else {
+        const raw = readJson(file);
+        if (!raw || !Array.isArray(raw.blocks)) {
+          add("blocks", "fail", "归档文件存在但不可解析（JSON 损坏或缺 blocks 数组）: " + file);
+        } else {
+          const maxExistingId = raw.blocks.reduce((m, b) => Math.max(m, parseInt(String(b && b.blockId).slice(1), 10) || 0), 0);
+          const fileNext = Number.isFinite(raw.nextBlockId) && raw.nextBlockId > 0 ? raw.nextBlockId : 0;
+          if (fileNext > 0 && fileNext < maxExistingId + 1) {
+            add("blocks", "warn", `nextBlockId=${fileNext} 落后于最大块号 ${maxExistingId}——下次写块时 server 会自愈为 ${maxExistingId + 1}，无需处理（当前 ${raw.blocks.length} 块）`);
+          } else {
+            add("blocks", "ok", `归档 ${raw.blocks.length} 块，nextBlockId=${Math.max(fileNext, maxExistingId + 1)}: ${file}`);
+          }
+        }
+      }
+    } catch (e) {
+      add("blocks", "fail", "检查异常: " + (e && e.message));
+    }
+  }
+
+  // 7. 压缩统计：结构完整性 + 节省账本有无
+  if (dirOk) {
+    try {
+      const cs = readJson(COMPACT_STATS_FILE);
+      if (!cs) {
+        add("compact_stats", "ok", "暂无压缩事件记录（正常）");
+      } else if (!Array.isArray(cs.events)) {
+        add("compact_stats", "fail", "compact-stats.json 存在但结构异常（缺 events 数组）: " + COMPACT_STATS_FILE);
+      } else {
+        const t = cs.totals;
+        add(
+          "compact_stats",
+          "ok",
+          `压缩事件 ${cs.events.length} 条（滚动上限 20）${t && typeof t.totalEvents === "number" ? `；节省账本累计 ${t.totalEvents} 次 / 共释放 ${t.totalSaved} tokens` : "；无节省账本（v0.7.0 前旧数据，不回填）"}`
+        );
+      }
+    } catch (e) {
+      add("compact_stats", "fail", "检查异常: " + (e && e.message));
+    }
+  }
+
+  // 8. 窗口校准：观测文件清单
+  if (dirOk) {
+    try {
+      const cals = fs.readdirSync(STATE_DIR).filter((f) => /^window-calibration(-[A-Za-z0-9._-]{1,48})?\.json$/.test(f));
+      if (cals.length === 0) {
+        add("calibration", "ok", "暂无校准观测（正常；压缩事件且 prevUsed≥60% 窗口时自动累积）");
+      } else {
+        const rows = cals.map((f) => {
+          const c = readJson(path.join(STATE_DIR, f));
+          const n = c && Array.isArray(c.observations) ? c.observations.length : 0;
+          return `${f}(${n})`;
+        });
+        add("calibration", "ok", `校准观测 ${cals.length} 个文件: ` + rows.join(", "));
+      }
+    } catch (e) {
+      add("calibration", "fail", "检查异常: " + (e && e.message));
+    }
+  }
+
+  // 9. 会话状态遗留：超 30 天未动的提醒/冷却/召回标记（短横必需，历史遗留 nudge.json 不计入）
+  if (dirOk) {
+    try {
+      const re = /^(nudge|absorb|recall-pending)-[A-Za-z0-9_-]{1,64}\.json$/;
+      let total = 0;
+      let stale = 0;
+      for (const f of fs.readdirSync(STATE_DIR)) {
+        if (!re.test(f)) continue;
+        total += 1;
+        try {
+          const st = fs.statSync(path.join(STATE_DIR, f));
+          if (Date.now() - st.mtimeMs > 30 * 24 * 3600 * 1000) stale += 1;
+        } catch {} // 单文件 stat 失败跳过，不拖垮整项检查
+      }
+      if (stale > 0) {
+        add("stale_sessions", "warn", `${stale}/${total} 个会话状态文件超过 30 天未动（遗留提醒/冷却标记，不影响计量）；想清理用 dcp_reset`);
+      } else {
+        add("stale_sessions", "ok", `会话状态文件 ${total} 个，均无超期（30 天）`);
+      }
+    } catch (e) {
+      add("stale_sessions", "fail", "检查异常: " + (e && e.message));
+    }
+  }
+
+  // 10. 调试日志：存在性与体积
+  try {
+    let st = null;
+    try { st = fs.statSync(DEBUG_LOG_FILE); } catch {}
+    if (!st) {
+      add("debug_log", "ok", "调试日志不存在（debug_log 关闭属正常；排查问题时在插件设置开启，或环境变量 DCP_DEBUG=1 临时开启）");
+    } else {
+      add("debug_log", "ok", `调试日志 ${(st.size / 1024).toFixed(1)} KB（>512KB 自动轮转为 .1）: ${DEBUG_LOG_FILE}`);
+    }
+  } catch (e) {
+    add("debug_log", "fail", "检查异常: " + (e && e.message));
+  }
+
+  // 11. hook 形态：全部命令须 node 直调 auto-watch.cjs（.cmd 包装在 Windows 会失败）
+  try {
+    const hp = path.join(__dirname, "..", "..", "hooks", "hooks.json");
+    const h = JSON.parse(fs.readFileSync(hp, "utf-8"));
+    const cmds = [];
+    for (const ev of Object.keys(h.hooks || {})) {
+      for (const m of h.hooks[ev] || []) for (const hk of m.hooks || []) cmds.push(hk.command);
+    }
+    if (cmds.length === 0) {
+      add("hooks_shape", "fail", "hooks.json 无任何 hook 命令（结构异常）: " + hp);
+    } else {
+      const bad = cmds.filter((c) => !(String(c).startsWith("node ") && String(c).includes("auto-watch.cjs")));
+      if (bad.length > 0) {
+        add("hooks_shape", "fail", `存在 ${bad.length} 条非 node 直调的 hook 命令（Windows 上 .cmd 包装会失败）: ` + bad.join(" | "));
+      } else {
+        add("hooks_shape", "ok", `hooks.json 共 ${cmds.length} 条命令，全部 node 直调 auto-watch.cjs（跨平台）`);
+      }
+    }
+  } catch (e) {
+    add("hooks_shape", "fail", "hooks.json 不可读或解析失败: " + (e && e.message));
+  }
+
+  const fails = checks.filter((c) => c.status === "fail").length;
+  const warns = checks.filter((c) => c.status === "warn").length;
+  const oks = checks.filter((c) => c.status === "ok").length;
+  const skippedN = checks.filter((c) => c.status === "skipped").length;
+  const verdict = fails > 0 ? "fail" : warns > 0 ? "warn" : "ok";
+  const message =
+    verdict === "fail"
+      ? `有 ${fails} 项 fail：相关功能可能不工作，按对应 checks 的 detail 修复（常见：阈值顺序破坏→设置里改回严格递增；计量停更→检查插件 hook 是否批准启用；config.json 不可解析→备份后重置）。仍无法解决请带本结果向作者报障。`
+      : verdict === "warn"
+        ? `有 ${warns} 项 warn：不影响运行，按 detail 逐条处理即可。`
+        : "各链路正常。";
+  return {
+    stateDir: STATE_DIR,
+    verdict,
+    checks,
+    summary: `检查 ${checks.length} 项：${fails} fail / ${warns} warn / ${oks} ok / ${skippedN} skipped`,
+    message,
+    note: "纯只读体检：仅读取配置与状态文件，不写入不删除。",
   };
 }
 
@@ -204,6 +508,7 @@ const tools = [
       required: ["topic", "summary"],
     },
     handler(args) {
+      loadBlocks(); // 变更前重读磁盘：缩小同项目双实例 last-writer-wins 竞态窗口，并让跨窗口新块可见
       const topic = args.topic == null ? "" : String(args.topic).trim();
       const summary = args.summary == null ? "" : String(args.summary).trim();
       if (!topic || !summary) {
@@ -255,6 +560,7 @@ const tools = [
       required: ["blockId"],
     },
     handler(args) {
+      loadBlocks(); // 读取前重读磁盘，让跨窗口新块可见
       const block = state.blocks.find((b) => b.blockId === args.blockId);
       if (!block) {
         return {
@@ -287,6 +593,7 @@ const tools = [
       required: ["query"],
     },
     handler(args) {
+      loadBlocks(); // 读取前重读磁盘，让跨窗口新块可见
       const query = String(args.query || "").trim();
       if (!query) {
         return { query, results: [], message: "查询词为空，无命中。" };
@@ -334,12 +641,37 @@ const tools = [
     description: "查看压缩统计（块数量/主题/历史、重复主题与错误块洞察）与当前真实上下文占用。",
     inputSchema: { type: "object", properties: {} },
     handler() {
+      loadBlocks(); // 读取前重读磁盘，让跨窗口新块可见
       const all = state.blocks;
       const topicCount = {};
       for (const b of all) {
         const t = normTopic(b.topic);
         if (t) topicCount[t] = (topicCount[t] || 0) + 1;
       }
+      // 压缩节省账本（v0.7.0 起由 hook 增量累计；purge 后归零）
+      const cs = readJson(COMPACT_STATS_FILE);
+      const tot = cs && cs.totals && typeof cs.totals.totalEvents === "number" ? cs.totals : null;
+      const savings = tot
+        ? {
+            totalEvents: tot.totalEvents,
+            totalSaved: tot.totalSaved,
+            since: tot.since,
+            perModel: tot.perModel || {},
+            perDayRecent: Object.keys(tot.perDay || {})
+              .sort()
+              .slice(-7)
+              .map((d) => {
+                const e = tot.perDay[d] || { events: 0, saved: 0 }; // 条目损坏时降级为 0，不拖垮整个 savings
+                return { day: d, events: e.events, saved: e.saved };
+              }),
+            note: "账本自首条记录起累计（purge 后归零）；perDayRecent 近 7 个 UTC 日期，取自 totals 而非 events",
+          }
+        : {
+            totalEvents: 0,
+            totalSaved: 0,
+            since: null,
+            note: "暂无账本（自 v0.7.0 起累计；旧版本压缩事件不回填）",
+          };
       return {
         sessionId: "in-session",
         totalBlocks: all.length,
@@ -348,6 +680,7 @@ const tools = [
         totalDecompressions: state.stats.totalDecompressions,
         statsNote: "totalCompressions/totalDecompressions 统计自 server 启动（跨重启不累计）；totalBlocks 持久化",
         lastCompressionAt: state.stats.lastCompressionAt ? formatLocalTime(state.stats.lastCompressionAt) : null,
+        savings,
         insights: {
           duplicateTopics: Object.values(topicCount).filter((n) => n > 1).length,
           errorBlocks: all.filter((b) => b.type === "error").length,
@@ -399,12 +732,13 @@ const tools = [
         }
       } catch {}
 
-      // 白名单：只有匹配以下模式的文件才是本插件状态（含原子写残留的 .tmp 与按模型分校准的 window-calibration-<model>）
+      // 白名单：只有匹配以下模式的文件才是本插件状态（含原子写残留的 .tmp、按模型分校准的 window-calibration-<model> 与调试日志 dcp-debug.log[.1]）
       const OWNED = (name) =>
         /^blocks(-[0-9a-f]{1,12})?\.json(\.tmp)?$/.test(name) ||
         /^(usage|compact-stats)\.json(\.tmp)?$/.test(name) ||
         /^window-calibration(-[A-Za-z0-9._-]{1,48})?\.json(\.tmp)?$/.test(name) ||
-        /^(nudge|absorb|recall-pending)-[A-Za-z0-9_-]{1,64}\.json(\.tmp)?$/.test(name);
+        /^(nudge|absorb|recall-pending)-[A-Za-z0-9_-]{1,64}\.json(\.tmp)?$/.test(name) ||
+        /^dcp-debug\.log(\.1)?$/.test(name);
       const CATEGORY = (name) => {
         if (/^blocks(-[0-9a-f]{1,12})?\.json(\.tmp)?$/.test(name)) return "归档块（清除即永久丢失）";
         if (name.startsWith("usage.json")) return "上下文计量";
@@ -413,6 +747,7 @@ const tools = [
         if (/^nudge-/.test(name)) return "分级提醒状态";
         if (/^absorb-/.test(name)) return "absorb 冷却状态";
         if (/^recall-pending-/.test(name)) return "压缩召回标记";
+        if (/^dcp-debug\.log(\.1)?$/.test(name)) return "调试日志";
         return "未识别文件（非插件状态，purge 不会删除）";
       };
 
@@ -499,6 +834,15 @@ const tools = [
       return { error: 'mode 仅支持 "list" 或 "purge"。' };
     },
   },
+  {
+    name: "dcp_doctor",
+    description:
+      "插件健康体检（纯只读）：状态目录、配置、阈值、计量链路、归档、压缩统计、窗口校准、会话状态、调试日志、hook 形态逐项检查并给出 verdict。排查\"为什么没提醒/没计量/占用不对\"从这里开始。",
+    inputSchema: { type: "object", properties: {} },
+    handler() {
+      return doctorReport();
+    },
+  },
 ];
 
 // ---------- JSON-RPC 分发 ----------
@@ -544,7 +888,8 @@ function handleMessage(msg) {
       break;
     case "tools/call": {
       const params = msg.params || {};
-      loadBlocks(); // 变更/读取前重读磁盘：缩小同项目双实例 last-writer-wins 竞态窗口，并让跨窗口新块可见
+      // loadBlocks 不在分发层统一调用：它经 blocksFileFor 有种子迁移写盘副作用，会让 context_usage/dcp_doctor
+      // 等"只读"工具违反纯只读承诺——改为只在真正触碰归档的 handler 内重读磁盘（竞态窗口缩小语义不变）
       const tool = tools.find((t) => t.name === params.name);
       if (!tool) {
         reply(msg.id, null, { code: -32602, message: `Unknown tool: ${params.name}` });
@@ -564,7 +909,7 @@ function handleMessage(msg) {
 }
 
 // ---------- 启动 ----------
-loadBlocks();
+loadBlocks(false); // 只读初始化：不触发种子迁移写盘（首次归档操作时才迁移）
 let buf = "";
 process.stdin.setEncoding("utf8");
 process.stdin.on("data", (chunk) => {

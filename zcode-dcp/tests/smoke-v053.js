@@ -72,7 +72,7 @@ fs.mkdirSync(SB_ROLLOUT, { recursive: true });
 {
   const r = rpc([INIT, { jsonrpc: "2.0", id: 2, method: "tools/list" }]);
   const names = r[1].result.tools.map((t) => t.name);
-  check("T4 六个工具含 dcp_reset", names.length === 6 && names.includes("dcp_reset"), names.join(","));
+  check("T4 七个工具含 dcp_reset", names.length === 7 && names.includes("dcp_reset"), names.join(","));
   const desc = r[1].result.tools.find((t) => t.name === "dcp_reset").description;
   check("T4 描述含不可逆护栏与 confirm", desc.includes("不可逆") && desc.includes("confirm"));
   check("T4 /dcp-uninstall 命令存在", fs.existsSync(path.join(SRC, "commands", "dcp-uninstall.md")));
@@ -81,7 +81,7 @@ fs.mkdirSync(SB_ROLLOUT, { recursive: true });
 // ---------- T5 版本 ----------
 {
   const m = JSON.parse(fs.readFileSync(path.join(SRC, ".zcode-plugin", "plugin.json"), "utf-8"));
-  check("T5 版本 0.6.0", m.version === "0.6.0");
+  check("T5 版本 0.7.0", m.version === "0.7.0");
 }
 
 // ---------- T6 purge × project scope + 磁盘为准不复活 ----------

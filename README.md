@@ -18,6 +18,7 @@ ZCode DCP 是一个 [ZCode](https://zcode.ai) 插件，用于**动态管理对�
 - **承重提示词** — 提醒与工具描述内嵌逐字保留规则（完整路径+行号、报错原文、决策及理由……），归档摘要可 grep、可回溯
 - **absorb-lite（实验性）** — 超大工具结果（默认 ≥8000 tokens）落地时提醒模型立即蒸馏归档，别等 nudge
 - **随时回溯** — `search_context` 按关键词检索归档块（中英文），`decompress` 取回全文，跨会话有效
+- **可观测性** — `dcp_doctor` 纯只读体检 11 项（含 verdict 与 skipped 语义），排查"没提醒/没数据"从这里开始；压缩节省账本累计每次内核压缩释放的 token（按模型/按 UTC 日分桶）；占用趋势环展示增长速度与"距压缩线预计轮数"；`DCP_DEBUG` 调试日志留痕每轮计量与提醒决策（仅元数据，不含对话内容）
 
 > 一个诚实的说明：ZCode 插件**无法删除对话历史里的消息**（这是内核能力，任何插件都做不到）。本插件做的是「归档瘦身」——它不会让占用条下降；真正释放 token 的是 ZCode 内置压缩（触发点≈窗口−34K，默认 1M 窗口下约 96.6%，或手动 `/compact`）。本插件的价值在于：50% 就开始阻止垃圾内容堆积、把重要信息摘要化，让内核自动压缩丢的信息更少。
 
@@ -28,9 +29,10 @@ ZCode DCP 是一个 [ZCode](https://zcode.ai) 插件，用于**动态管理对�
 | `compress(topic, summary, tags?, type?)` | 归档不再需要的对话内容为摘要（描述内嵌承重规则；同名主题返回重复提示，超上限自动蒸馏） |
 | `decompress(blockId)` | 查看已归档块的完整内容 |
 | `search_context(query, limit?)` | 按关键词检索归档块（中英文，多词交集） |
-| `context_usage` / `/dcp-usage` | 当前真实上下文占用（tokens 与百分比，含窗口来源） |
-| `context_stats` / `/dcp-stats` | 压缩统计 + 重复主题/错误块洞察 + 真实占用 |
-| `dcp_reset(mode)` / `/dcp-uninstall` | 列举/清除插件全部本地状态（卸载前清理，purge 不可逆） |
+| `context_usage` / `/dcp-usage` | 当前真实上下文占用（tokens 与百分比，含窗口来源与占用趋势/增速） |
+| `context_stats` / `/dcp-stats` | 压缩统计 + 压缩节省账本（按模型/按日） + 重复主题/错误块洞察 + 真实占用 |
+| `dcp_doctor` / `/dcp-doctor` | 插件健康体检（纯只读 11 项检查 + verdict），排查"没提醒/没数据/占用不对"从这里开始 |
+| `dcp_reset(mode)` / `/dcp-uninstall` | 列举/清除插件全部本地状态（卸载前清理，purge 不可逆；白名单含调试日志） |
 | 自动监控（hook） | 每轮计量；50/70/80% 三级阈值注入分级提醒；压缩检测与召回；大工具结果蒸馏提示 |
 
 > v0.5 起 `sweep` 工具已移除：其去重职责由 compress 的重复提示覆盖，统计面由 `context_stats` 的 insights 承接。
@@ -55,8 +57,9 @@ UI 卸载（**设置 → 插件 → zcode-dcp → 卸载**）只移除插件本�
 | 文件 | 内容 | 清除后果 |
 |---|---|---|
 | `blocks*.json` | 归档块（你的压缩知识库） | **永久丢失** |
-| `usage.json` / `compact-stats.json` / `window-calibration.json` | 计量 / 压缩统计 / 窗口校准 | 重新累积 |
+| `usage.json` / `compact-stats.json` / `window-calibration.json` | 计量 / 压缩统计与节省账本 / 窗口校准 | 重新累积 |
 | `nudge-*` / `absorb-*` / `recall-pending-*` | 提醒与冷却状态 | 无损重置 |
+| `dcp-debug.log(.1)` | 调试日志（`debug_log`/`DCP_DEBUG` 开启时才存在） | 可再生，无损失 |
 
 两条清理路径：
 
@@ -81,6 +84,7 @@ UI 卸载（**设置 → 插件 → zcode-dcp → 卸载**）只移除插件本�
 | `max_blocks` | 200 | 归档块上限，超限自动蒸馏合并最旧约 20% |
 | `absorb_min_tool_tokens` | 8000 | 大工具结果蒸馏提示阈值（0 = 关闭 absorb-lite） |
 | `auto_watch` | true | 关闭后回到纯手动模式 |
+| `debug_log` | false | 调试日志：开启后 hook 每轮把计量与提醒决策写入 `~/.zcode/dcp/dcp-debug.log`（超 512KB 自动轮转 `.1`），仅记录元数据不含对话内容；排查"为什么没提醒/没计量"用。也可用环境变量 `DCP_DEBUG=1` 临时开启（优先于本配置） |
 
 ## 工作原理
 
@@ -108,9 +112,11 @@ hook（auto-watch.cjs）读取
 
 归档块按 `archive_scope` 持久化于 `~/.zcode/dcp/blocks[-<项目哈希>].json`，跨会话可 `search_context` 检索、`decompress` 取回；超过 `max_blocks` 时最旧约 20% 自动蒸馏合并（各块的 Open objectives 行逐字保留）。窗口校准仅在未显式配置 `context_window_tokens` 时生效（config > calibrated > 默认 1M，`context_usage` 的 windowSource 字段可见来源）。
 
+节省账本随每次内核压缩事件增量累计（自 v0.7.0 起从零累计，不回填更早历史，`dcp_reset` purge 后归零）；占用趋势环内嵌于计量状态（上限 60 点，双事件去重、会话/模型切换重置），`context_usage` 返回最近 10 点平均增速与距 tier3 阈值的预计轮数（线性外推，仅供参考）；`dcp_doctor` 为纯只读体检——全程不写盘（连启动初始化都不触发种子迁移），11 项检查见返回的 `checks` 数组，verdict 按 fail > warn > ok 聚合（skipped 不参与）。
+
 ## 致谢
 
-分级提醒与压缩规则的提示词工程改写自 [acp-kernel](https://github.com/ranxianglei/acp-kernel)（MIT，@ranxianglei）——其 KEEP VERBATIM 承重规则、压缩优先级清单与防污染条款在生产环境打磨数月，并经事故报告修正（#309 / #442 / #493）；absorb-lite 的即时蒸馏语义改写自其 [absorb.ts](https://github.com/ranxianglei/acp-kernel/blob/master/src/absorb.ts)（插件侧仅能注入提示，无法隐藏原文）。架构上本插件与其同源的 billion-context 代理方案互补：代理路线通过改写 API 请求实现物理压缩，本插件在 ZCode 的签名限制（ClientRequestSigningV4 强制 HTTPS）下提供纯插件面的引导式压缩。
+分级提醒与压缩规则的提示词工程改写自 [acp-kernel](https://github.com/ranxianglei/acp-kernel)（MIT，@ranxianglei）——其 KEEP VERBATIM 承重规则、压缩优先级清单与防污染条款在生产环境打磨数月，并经事故报告修正（#309 / #442 / #493）；absorb-lite 的即时蒸馏语义改写自其 [absorb.ts](https://github.com/ranxianglei/acp-kernel/blob/master/src/absorb.ts)（插件侧仅能注入提示，无法隐藏原文）。可观测性设计（健康体检 / 节省账本 / 轮转调试日志 / 占用趋势）对位其同源的 [billion-context](https://github.com/ranxianglei/billion-context)（/__bili/health、压缩经济学账本、bili.log 轮转日志）。架构上两者互补：代理路线通过改写 API 请求实现物理压缩，本插件在 ZCode 的签名限制（ClientRequestSigningV4 强制 HTTPS）下提供纯插件面的引导式压缩。
 
 ## 已验证环境与已知限制
 
@@ -127,7 +133,7 @@ hook（auto-watch.cjs）读取
 零依赖，纯 Node.js（无需 `npm install`）。全量冒烟测试（Windows/Linux 均可跑，CI 矩阵自动执行）：
 
 ```bash
-node tests/run-all.js        # 7 个套件：回归 / v0.4 系 / 审查修复 / v0.5 / 二审 / 卸载清理 / 模型隔离
+node tests/run-all.js        # 8 个套件：回归 / v0.4 系 / 审查修复 / v0.5 / 二审 / 卸载清理 / 模型隔离 / 可观测性
 ```
 
 欢迎 PR：压缩后召回的端到端实测反馈、更多压缩策略、占用趋势记录、更好看的统计输出……
@@ -146,7 +152,7 @@ The load-bearing prompt rules (KEEP VERBATIM list, compression priority order, a
 
 ## English
 
-ZCode DCP is a [ZCode](https://zcode.ai) plugin for dynamic context management: it meters real context usage every turn (from ZCode's model-IO logs), injects tiered compression nudges at 50/70/80% thresholds, and archives stale content (old search results, resolved errors, duplicate tool calls) into searchable, persistent summaries (`search_context` + `decompress`, surviving restarts). After the kernel's built-in compact rewrites the conversation, DCP injects an archive index into the fresh context (experimental).
+ZCode DCP is a [ZCode](https://zcode.ai) plugin for dynamic context management: it meters real context usage every turn (from ZCode's model-IO logs), injects tiered compression nudges at 50/70/80% thresholds, and archives stale content (old search results, resolved errors, duplicate tool calls) into searchable, persistent summaries (`search_context` + `decompress`, surviving restarts). After the kernel's built-in compact rewrites the conversation, DCP injects an archive index into the fresh context (experimental). v0.7.0 adds observability: a read-only `dcp_doctor` health check (11 checks), a compression savings ledger (per-model / per-UTC-day), an in-file usage trend (avg growth per turn + estimated turns to the tier-3 line), and opt-in metadata-only debug logging (`debug_log` config or `DCP_DEBUG=1`).
 
 **Honest note:** ZCode plugins cannot delete messages from conversation history — only the kernel's built-in compact (trigger ≈ window − 34K, ~96.6% on the default 1M window, or manual `/compact`) actually frees tokens. DCP's value is stopping junk accumulation early and summarizing important info before that compact happens.
 

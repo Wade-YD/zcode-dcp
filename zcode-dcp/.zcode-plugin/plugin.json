@@ -1,6 +1,6 @@
 {
   "name": "zcode-dcp",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "Dynamic Context Pruning v5 - 三级压缩提醒、压缩检测与窗口校准、会话隔离、按项目隔离的可检索归档与生命周期管理",
   "author": {
     "name": "ZCode DCP"
@@ -83,6 +83,12 @@
       "title": "启用自动计量",
       "description": "每轮读取 ZCode 模型 IO 日志计量真实 token 占用，达到阈值时自动提醒压缩",
       "default": true
+    },
+    "debug_log": {
+      "type": "boolean",
+      "title": "调试日志",
+      "description": "开启后 hook 每轮把计量与提醒决策写入 ~/.zcode/dcp/dcp-debug.log（超过 512KB 自动轮转），用于排查\"为什么没提醒/没计量\"；仅记录元数据，不记录对话内容。也可用环境变量 DCP_DEBUG=1 临时开启（优先于本配置）",
+      "default": false
     }
   }
 }

@@ -1,4 +1,4 @@
-/* zcode-dcp v0.6.0 冒烟测试：模型隔离计量/校准按模型分文件+回退/显式优先/跨平台 hooks 形态 */
+/* zcode-dcp v0.6.0 冒烟测试（断言随 0.7.0 版本断言更新）：模型隔离计量/校准按模型分文件+回退/显式优先/跨平台 hooks 形态 */
 "use strict";
 const fs = require("fs");
 const path = require("path");
@@ -151,7 +151,7 @@ reset();
     encoding: "utf-8",
   });
   const ver = JSON.parse(sv.trim().split("\n")[0]).result.serverInfo.version;
-  check("T5 版本 0.6.0 一致", p.version === "0.6.0" && ver === "0.6.0");
+  check("T5 版本 0.7.0 一致", p.version === "0.7.0" && ver === "0.7.0");
 }
 
 console.log(`\n==== ${pass} passed, ${fail} failed ====`);

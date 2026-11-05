@@ -9,9 +9,9 @@
  *   stop           Stop：仅计量
  *
  * 状态文件（~/.zcode/dcp/）:
- *   usage.json（全局最近活跃会话，供 server 显示）、nudge-<sid>.json（会话隔离提醒状态）、
- *   absorb-<sid>.json（absorb 冷却）、compact-stats.json（压缩事件）、window-calibration.json（窗口校准）、
- *   blocks[-<projhash>].json（归档，project scope 时按项目哈希分文件）
+ *   usage.json（全局最近活跃会话，供 server 显示，含占用趋势环 history）、nudge-<sid>.json（会话隔离提醒状态）、
+ *   absorb-<sid>.json（absorb 冷却）、compact-stats.json（压缩事件+节省账本）、window-calibration.json（窗口校准）、
+ *   blocks[-<projhash>].json（归档，project scope 时按项目哈希分文件）、dcp-debug.log（调试日志，debug_log/DCP_DEBUG 开启时）
  *
  * 任何错误都静默退出（exit 0），绝不阻塞对话。承重提示词改写自 acp-kernel (MIT, @ranxianglei)。
  */
@@ -26,6 +26,7 @@ const {
   KERNEL_COMPACT_RESERVE,
   readJson,
   writeJson,
+  appendDebugLog,
   sanitizeSid,
   blocksFileFor,
   eachPluginOption,
@@ -47,11 +48,18 @@ const DEFAULTS = {
   absorb_min_tool_tokens: 8000,
 };
 
+// ---------- 调试日志（debug_log 配置或 DCP_DEBUG 开启；只记元数据，严禁 prompt 文本/tool_response 内容/归档摘要/cwd） ----------
+let DBG_ENABLED = false;
+function dlog(detail, extra) {
+  if (!DBG_ENABLED) return;
+  appendDebugLog({ detail, ...extra });
+}
+
 // ---------- 配置: env(仅手动设置) > config.json > 默认 ----------
 // 注意：plugin.json 的 env 模板只对 mcpServers 生效，hook 进程拿不到 user_config 的 env——
 // config.json（plugins.options 里含 "zcode-dcp" 的键）是 userConfig 到达 hook 的唯一正式通道。
 function loadConfig() {
-  const cfg = { ...DEFAULTS, _windowExplicit: false };
+  const cfg = { ...DEFAULTS, _windowExplicit: false, debug_log: false };
   eachPluginOption((val) => applyConfigObject(cfg, val));
   const num = (name) => {
     const v = Number(process.env[name]);
@@ -77,6 +85,8 @@ function loadConfig() {
   };
   if (nonNeg("DCP_NUDGE_COOLDOWN_MINUTES") !== null) cfg.nudge_cooldown_minutes = nonNeg("DCP_NUDGE_COOLDOWN_MINUTES");
   if (nonNeg("DCP_ABSORB_MIN_TOOL_TOKENS") !== null) cfg.absorb_min_tool_tokens = nonNeg("DCP_ABSORB_MIN_TOOL_TOKENS");
+  // env 优先于 config（临时开关不改配置）
+  if (process.env.DCP_DEBUG === "1" || process.env.DCP_DEBUG === "true") cfg.debug_log = true;
   return cfg;
 }
 
@@ -100,6 +110,8 @@ function applyConfigObject(cfg, val) {
   if (pos(val.max_blocks)) cfg.max_blocks = +val.max_blocks;
   if (Number.isFinite(+val.absorb_min_tool_tokens) && +val.absorb_min_tool_tokens >= 0)
     cfg.absorb_min_tool_tokens = +val.absorb_min_tool_tokens;
+  // 多插件键 OR 语义：任一含 zcode-dcp 的键开了 debug_log 即生效
+  if (val.debug_log === true) cfg.debug_log = true;
 }
 
 // ---------- 窗口校准（按模型隔离：观测写 window-calibration-<slug>.json；无专属观测回退旧全局文件） ----------
@@ -221,9 +233,22 @@ function readLatestUsage(sessionId) {
 }
 
 // ---------- 计量写盘 + 骤降压缩检测 ----------
-function writeUsage(sessionId, eventName, used, total, cfg, modelId) {
+function writeUsage(sessionId, eventName, used, total, cfg, modelId, prevUsage) {
   const win = effectiveWindow(cfg, modelId);
   const pct = Math.min(100, (used / win.window) * 100);
+  // 趋势环：同会话且用量未变→去重（每轮 prompt+stop 双事件只记变化点）；会话变更→重置；上限 60 点；绝不 throw
+  let history = [];
+  try {
+    const sid = sessionId || null;
+    const prevHist = prevUsage && Array.isArray(prevUsage.history) ? prevUsage.history : [];
+    const last = prevHist.length ? prevHist[prevHist.length - 1] : null;
+    const pt = { t: new Date().toISOString(), used, pct: Math.round(pct * 10) / 10, modelId: modelId || null, sid };
+    if (!last) history = [pt];
+    else if (last.sid !== sid) history = [pt];
+    else if ((last.modelId || null) !== (modelId || null)) history = [pt]; // 同会话换模型：切换跳变会污染增速估计，重置环
+    else if (last.used === used) history = prevHist;
+    else history = prevHist.concat(pt).slice(-60);
+  } catch {}
   writeJson(USAGE_FILE, {
     usedTokens: used,
     totalTokens: total,
@@ -238,6 +263,7 @@ function writeUsage(sessionId, eventName, used, total, cfg, modelId) {
     scopeNote: "最近活跃会话",
     event: eventName,
     updatedAt: new Date().toISOString(),
+    history,
   });
   return { pct, win };
 }
@@ -258,10 +284,30 @@ function detectCompact(sessionId, used, prevUsage, cfg, modelId) {
     sessionId: sessionId || null,
     modelId: modelId || null,
   };
+  dlog("compact-detected", { pre: event.preTokens, post: event.postTokens, saved: event.saved });
   const stats = readJson(COMPACT_STATS_FILE) || { events: [] };
   if (!Array.isArray(stats.events)) stats.events = [];
   stats.events.push(event);
   stats.events = stats.events.slice(-20);
+  // 节省账本：自启用起从零增量累计（不回填历史 events，events 仅留 20 条，重算会系统性低估）；绝不从 events 重算
+  if (!stats.totals || typeof stats.totals.totalEvents !== "number") {
+    stats.totals = { since: event.at, totalEvents: 0, totalSaved: 0, perModel: {}, perDay: {} };
+  }
+  // 子结构损坏时补齐（totalEvents 合法但 perModel/perDay 缺失的坏文件，避免该轮压缩检出静默丢失）
+  if (!stats.totals.perModel || typeof stats.totals.perModel !== "object") stats.totals.perModel = {};
+  if (!stats.totals.perDay || typeof stats.totals.perDay !== "object") stats.totals.perDay = {};
+  stats.totals.totalEvents += 1;
+  stats.totals.totalSaved += event.saved;
+  const mk = event.modelId || "unknown";
+  const pm = stats.totals.perModel[mk] || { events: 0, saved: 0 };
+  pm.events += 1;
+  pm.saved += event.saved;
+  stats.totals.perModel[mk] = pm;
+  const day = event.at.slice(0, 10); // UTC 日期（event.at 为 toISOString）
+  const pd = stats.totals.perDay[day] || { events: 0, saved: 0 };
+  pd.events += 1;
+  pd.saved += event.saved;
+  stats.totals.perDay[day] = pd;
   writeJson(COMPACT_STATS_FILE, stats);
   // 校准只采"窗口后 40% 区间"的压缩（符合内核触发点特征）；低水位压缩多为手动 /compact，会砸穿校准
   const win = effectiveWindow(cfg, modelId);
@@ -349,6 +395,11 @@ function buildCompactRecapText(event, projectDir, scope, cfg) {
     const win2 = Number.isFinite(usage.contextWindowTokens) ? usage.contextWindowTokens : effectiveWindow(cfg, usage.modelId).window;
     parts.push(`[dcp 状态] 当前占用 ${((usage.usedTokens / win2) * 100).toFixed(1)}%（${fmtNum(usage.usedTokens)} / ${fmtNum(win2)} tokens）。`);
   }
+  // 节省账本累计行（仅多于 1 条时展示，避免单次压缩的噪音）
+  const stats = readJson(COMPACT_STATS_FILE);
+  if (stats && stats.totals && stats.totals.totalEvents > 1) {
+    parts.push(`[dcp 账本] 历史累计 ${stats.totals.totalEvents} 次压缩、共释放 ${fmtNum(stats.totals.totalSaved)} tokens（自 ${String(stats.totals.since || "").slice(0, 10) || "启用"} 起累计）。`);
+  }
   return parts.join("\n");
 }
 
@@ -413,9 +464,13 @@ function maybeAbsorb(input, cfg, sessionId) {
   const prev = readJson(af);
   if (prev && prev.lastAbsorbAt) {
     const age = Date.now() - new Date(prev.lastAbsorbAt).getTime();
-    if (Number.isFinite(age) && age < 10 * 60000) return false; // 会话级 10 分钟冷却
+    if (Number.isFinite(age) && age < 10 * 60000) {
+      dlog("absorb", { decision: "skip-cooldown", tool: String(input.tool_name || "tool"), tokens }); // 会话级 10 分钟冷却
+      return false;
+    }
   }
   writeJson(af, { lastAbsorbAt: new Date().toISOString(), lastTokens: tokens });
+  dlog("absorb", { decision: "emit", tool: String(input.tool_name || "tool"), tokens });
   emitAdditionalContext(buildAbsorbText(String(input.tool_name || "tool"), tokens));
   return true;
 }
@@ -435,8 +490,10 @@ function main(input, mode) {
   }
 
   const cfg = loadConfig();
+  DBG_ENABLED = !!cfg.debug_log;
   const sessionId = input.session_id || process.env.ZCODE_SESSION_ID || "";
   const projectDir = input.cwd || process.env.ZCODE_PROJECT_DIR || "";
+  dlog("start", { mode, event: eventName, sid: sessionId || null });
 
   if (mode === "session-start") {
     let text = sessionStartText(projectDir, cfg.archive_scope);
@@ -458,10 +515,15 @@ function main(input, mode) {
   if (!cfg.auto_watch) return;
 
   const usage = readLatestUsage(sessionId);
-  if (!usage) return;
+  if (!usage) {
+    dlog("no-usage", { mode, sid: sessionId || null });
+    return;
+  }
+  dlog("usage", { mode, used: usage.usedTokens, modelId: usage.modelId });
 
   const prevUsage = readJson(USAGE_FILE); // 必须在 writeUsage 覆写前取前值
-  writeUsage(sessionId, eventName, usage.usedTokens, usage.totalTokens, cfg, usage.modelId);
+  dlog("prev", { prevUsed: prevUsage && Number.isFinite(prevUsage.usedTokens) ? prevUsage.usedTokens : null, prevModelId: (prevUsage && prevUsage.modelId) || null });
+  writeUsage(sessionId, eventName, usage.usedTokens, usage.totalTokens, cfg, usage.modelId, prevUsage);
 
   // 骤降 → 压缩检出：写召回标记；prompt 轮直接注入，stop 轮留给下一轮消费
   const compactEvent = detectCompact(sessionId, usage.usedTokens, prevUsage, cfg, usage.modelId);
@@ -493,6 +555,7 @@ function main(input, mode) {
   const nf = nudgeFileFor(sessionId);
   const prev = readJson(nf);
   const decision = decideNudge(tier, usage.usedTokens, prev, cfg);
+  dlog("tier", { tier, pct: Math.round(pctOfWin * 10) / 10, win: win.window, winSource: win.source, decision: decision.nudge ? "nudge" : decision.updateState ? "downgrade" : "skip-cooldown" });
   if (decision.nudge) {
     markNudged(nf, tier, usage.usedTokens);
     emitAdditionalContext(buildNudgeText(tier, usage.usedTokens, win.window, Math.round(pctOfWin * 10) / 10, cfg));
@@ -513,7 +576,10 @@ process.stdin.on("end", () => {
   try {
     const input = raw.trim() ? JSON.parse(raw) : {};
     main(input, process.argv[2] || "stop");
-  } catch {}
+  } catch (e) {
+    // 隐私红线：SyntaxError 的 message 会嵌入 stdin 原文片段，只记固定文案不记原文
+    dlog("error", { msg: e && e.name === "SyntaxError" ? "stdin JSON 解析失败（原文不记录）" : (e && e.message) });
+  }
   process.exit(0);
 });
 process.stdin.on("error", () => process.exit(0));
