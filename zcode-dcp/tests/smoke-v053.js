@@ -81,7 +81,7 @@ fs.mkdirSync(SB_ROLLOUT, { recursive: true });
 // ---------- T5 版本 ----------
 {
   const m = JSON.parse(fs.readFileSync(path.join(SRC, ".zcode-plugin", "plugin.json"), "utf-8"));
-  check("T5 版本 0.7.0", m.version === "0.7.0");
+  check("T5 版本 0.8.0", m.version === "0.8.0");
 }
 
 // ---------- T6 purge × project scope + 磁盘为准不复活 ----------

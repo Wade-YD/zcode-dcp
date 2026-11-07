@@ -10,6 +10,7 @@ description: 显示 DCP 详细压缩统计
 | 总解压次数 | ... |
 | 最近压缩时间 | ... |
 | 真实上下文占用 | ...%（如有计量数据） |
+| 节省账本（savings） | totalEvents 次压缩 / 共释放 totalSaved tokens（自 since 起） |
 
 **压缩块列表：**
 列出每个归档块的 blockId、topic、type、tags 和创建时间。

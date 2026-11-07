@@ -73,7 +73,7 @@ reset();
   check("T1a state_dir warn", idm.state_dir.status === "warn");
   check("T1a metering skipped", idm.metering.status === "skipped");
   check("T1a hooks_shape ok", idm.hooks_shape.status === "ok");
-  check("T1a 检查共 11 项", rep.checks.length === 11, String(rep.checks.length));
+  check("T1a 检查共 12 项", rep.checks.length === 12, String(rep.checks.length));
 }
 
 // b) 好状态种子 → 全 ok
@@ -89,7 +89,7 @@ reset();
   fs.writeFileSync(path.join(SB_STATE, "compact-stats.json"), JSON.stringify({ events: [{ at: new Date().toISOString(), preTokens: 500000, postTokens: 300000, saved: 200000, sessionId: "good", modelId: "ModelG" }] }));
   const rep = doctorCall();
   check("T1b 好状态 verdict=ok", rep.verdict === "ok", JSON.stringify(rep.checks).slice(0, 400));
-  check("T1b 检查共 11 项", rep.checks.length === 11);
+  check("T1b 检查共 12 项", rep.checks.length === 12);
 }
 
 // c) 破坏阈值（config.json nudge=70 > tier2=50）→ thresholds fail 且 verdict fail
@@ -163,7 +163,7 @@ reset();
 }
 
 // ---------- T3 调试日志 ----------
-const DBG_KEYS = new Set(["ts", "detail", "mode", "event", "sid", "used", "modelId", "prevUsed", "prevModelId", "tier", "pct", "win", "winSource", "decision", "pre", "post", "saved", "tool", "tokens", "msg"]);
+const DBG_KEYS = new Set(["ts", "detail", "mode", "event", "sid", "used", "modelId", "prevUsed", "prevModelId", "tier", "pct", "win", "winSource", "decision", "pre", "post", "saved", "tool", "tokens", "count", "msg"]);
 reset();
 {
   // a) 无 env 无 config → 不写调试日志
@@ -288,7 +288,7 @@ reset();
     encoding: "utf-8",
   });
   const ver = JSON.parse(sv.trim().split("\n")[0]).result.serverInfo.version;
-  check("T5 版本 0.7.0 三处一致", p.version === "0.7.0" && pkg.version === "0.7.0" && ver === "0.7.0");
+  check("T5 版本 0.8.0 三处一致", p.version === "0.8.0" && pkg.version === "0.8.0" && ver === "0.8.0");
 }
 
 console.log(`\n==== ${pass} passed, ${fail} failed ====`);

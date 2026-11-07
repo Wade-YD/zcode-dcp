@@ -30,9 +30,10 @@ const {
   blocksFileFor,
   blocksPathFor,
   eachPluginOption,
+  pluginEnabledStatus,
 } = require("../dcp-common.cjs"); // 相对本文件：dist/mcp → dist/dcp-common.cjs
 
-const SERVER_INFO = { name: "zcode-dcp", version: "0.7.0" };
+const SERVER_INFO = { name: "zcode-dcp", version: "0.8.0" };
 const PROJECT_DIR = String(process.env.DCP_PROJECT_DIR || "");
 const COMPACT_STATS_FILE = path.join(STATE_DIR, "compact-stats.json");
 
@@ -398,10 +399,10 @@ function doctorReport() {
     }
   }
 
-  // 9. 会话状态遗留：超 30 天未动的提醒/冷却/召回标记（短横必需，历史遗留 nudge.json 不计入）
+  // 9. 会话状态遗留：超 30 天未动的提醒/冷却/召回/失败计数标记（短横必需，历史遗留 nudge.json 不计入）
   if (dirOk) {
     try {
-      const re = /^(nudge|absorb|recall-pending)-[A-Za-z0-9_-]{1,64}\.json$/;
+      const re = /^(nudge|absorb|recall-pending|failure)-[A-Za-z0-9_-]{1,64}\.json$/;
       let total = 0;
       let stale = 0;
       for (const f of fs.readdirSync(STATE_DIR)) {
@@ -455,6 +456,34 @@ function doctorReport() {
     }
   } catch (e) {
     add("hooks_shape", "fail", "hooks.json 不可读或解析失败: " + (e && e.message));
+  }
+
+  // 12. 插件启用状态：抓"装了没启用/双开重复注入"（config 缺失/解析失败/键缺失 → skipped）
+  try {
+    let enabled = null;
+    try {
+      const cfgPath2 = path.join(HOME, ".zcode", "cli", "config.json");
+      if (fs.existsSync(cfgPath2)) {
+        const parsed2 = JSON.parse(fs.readFileSync(cfgPath2, "utf-8"));
+        if (parsed2 && parsed2.plugins && typeof parsed2.plugins.enabledPlugins === "object") enabled = parsed2.plugins.enabledPlugins;
+      }
+    } catch {}
+    if (!enabled) {
+      skip("plugin_enabled", "无法读取 plugins.enabledPlugins（config.json 缺失/不可解析/键缺失），跳过启用状态检查");
+    } else {
+      // 自身定位：dist/mcp → 版本目录 → 插件目录名 → marketplace 目录名（已安装缓存布局；dev workspace 回退唯一条目/启用数裁决）
+      const pluginDir = path.basename(path.resolve(__dirname, "..", "..", ".."));
+      const marketDir = path.basename(path.resolve(__dirname, "..", "..", "..", ".."));
+      const rep2 = pluginEnabledStatus(enabled, pluginDir, marketDir);
+      const conf = rep2.entries && rep2.entries.length ? `（条目: ${rep2.entries.join(", ")}）` : "";
+      if (rep2.status === "skipped") skip("plugin_enabled", "enabledPlugins 缺失");
+      else if (rep2.status === "fail") add("plugin_enabled", "fail", `本插件被禁用（此分支正常不可达——被禁用则本工具不会运行；出现即配置语义异常，请检查 设置 → 插件）${conf}`);
+      else if (rep2.status === "warn" && rep2.reason === "multi-enabled") add("plugin_enabled", "warn", `检测到 ${rep2.enabledKeys.length} 个 zcode-dcp 同时启用——压缩提醒会重复注入，请在 设置 → 插件 只保留一个: ${rep2.enabledKeys.join(", ")}`);
+      else if (rep2.status === "warn") add("plugin_enabled", "warn", `enabledPlugins 中没有任何 zcode-dcp 条目（未启用或 ZCode 布局不同）${conf}`);
+      else add("plugin_enabled", "ok", `已启用: ${rep2.selfKey}${rep2.reason === "unique-enabled" ? "（唯一启用条目视为本插件）" : ""}`);
+    }
+  } catch (e) {
+    add("plugin_enabled", "fail", "检查异常: " + (e && e.message));
   }
 
   const fails = checks.filter((c) => c.status === "fail").length;
@@ -583,7 +612,7 @@ const tools = [
   {
     name: "search_context",
     description:
-      "按关键词检索已归档的压缩块（匹配 topic/tags/summary，大小写不敏感，多关键词取交集，中英文均可），返回块 ID、主题与命中片段；配合 decompress 取回完整摘要。",
+      "按关键词检索已归档的压缩块（匹配 topic/tags/summary，大小写不敏感，多关键词取交集，中英文均可），返回块 ID、主题与命中片段；配合 decompress 取回完整摘要。中文长句建议用空格拆成 2-3 个关键词重试。",
     inputSchema: {
       type: "object",
       properties: {
@@ -631,7 +660,7 @@ const tools = [
         results,
         message:
           scored.length === 0
-            ? `无命中：没有同时包含全部关键词（${query}）的归档块。`
+            ? `无命中：没有同时包含全部关键词（${query}）的归档块。中文长句建议用空格拆成 2-3 个关键词重试。`
             : `命中 ${scored.length} 块${scored.length > results.length ? `（显示前 ${results.length} 条）` : ""}，用 decompress 取回完整摘要。`,
       };
     },
@@ -732,12 +761,13 @@ const tools = [
         }
       } catch {}
 
-      // 白名单：只有匹配以下模式的文件才是本插件状态（含原子写残留的 .tmp、按模型分校准的 window-calibration-<model> 与调试日志 dcp-debug.log[.1]）
+      // 白名单：只有匹配以下模式的文件才是本插件状态（含原子写残留的 .tmp、按模型分校准的 window-calibration-<model>、
+      // 失败计数 failure-<sid> 与调试日志 dcp-debug.log[.1]）
       const OWNED = (name) =>
         /^blocks(-[0-9a-f]{1,12})?\.json(\.tmp)?$/.test(name) ||
         /^(usage|compact-stats)\.json(\.tmp)?$/.test(name) ||
         /^window-calibration(-[A-Za-z0-9._-]{1,48})?\.json(\.tmp)?$/.test(name) ||
-        /^(nudge|absorb|recall-pending)-[A-Za-z0-9_-]{1,64}\.json(\.tmp)?$/.test(name) ||
+        /^(nudge|absorb|recall-pending|failure)-[A-Za-z0-9_-]{1,64}\.json(\.tmp)?$/.test(name) ||
         /^dcp-debug\.log(\.1)?$/.test(name);
       const CATEGORY = (name) => {
         if (/^blocks(-[0-9a-f]{1,12})?\.json(\.tmp)?$/.test(name)) return "归档块（清除即永久丢失）";
@@ -747,6 +777,7 @@ const tools = [
         if (/^nudge-/.test(name)) return "分级提醒状态";
         if (/^absorb-/.test(name)) return "absorb 冷却状态";
         if (/^recall-pending-/.test(name)) return "压缩召回标记";
+        if (/^failure-/.test(name)) return "失败计数状态";
         if (/^dcp-debug\.log(\.1)?$/.test(name)) return "调试日志";
         return "未识别文件（非插件状态，purge 不会删除）";
       };

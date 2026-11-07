@@ -109,6 +109,25 @@ function eachPluginOption(cb) {
   } catch {}
 }
 
+// 插件启用状态三层自定位（纯函数：不做任何 IO，enabledPlugins 由调用方解析传入）。
+// 三层：精确 key（插件目录名@marketplace 目录名）→ 唯一 zcode-dcp 条目回退 → 多条目按启用数裁决。
+function pluginEnabledStatus(enabledPlugins, selfPluginName, selfMarketplaceName) {
+  if (!enabledPlugins || typeof enabledPlugins !== "object") return { status: "skipped", reason: "enabledPlugins 缺失" };
+  const lc = (s) => String(s || "").toLowerCase();
+  const entries = Object.keys(enabledPlugins).filter((k) => lc(k).includes("zcode-dcp"));
+  if (entries.length === 0) return { status: "warn", reason: "no-entries", entries: [] };
+  const selfKey = entries.find((k) => lc(k) === lc(`${selfPluginName}@${selfMarketplaceName}`)) || null;
+  const enabledKeys = entries.filter((k) => enabledPlugins[k] === true);
+  if (entries.length === 1) {
+    return enabledKeys.length === 1
+      ? { status: "ok", selfKey: entries[0], enabledKeys, entries }
+      : { status: "fail", selfKey: entries[0], enabledKeys: [], entries, reason: "self-disabled" };
+  }
+  if (enabledKeys.length >= 2) return { status: "warn", reason: "multi-enabled", selfKey, enabledKeys, entries };
+  if (enabledKeys.length === 1) return { status: "ok", selfKey: selfKey || enabledKeys[0], enabledKeys, entries, reason: "unique-enabled" };
+  return { status: "fail", selfKey, enabledKeys: [], entries, reason: "all-disabled" };
+}
+
 module.exports = {
   HOME,
   STATE_DIR,
@@ -126,4 +145,5 @@ module.exports = {
   blocksPathFor,
   blocksFileFor,
   eachPluginOption,
+  pluginEnabledStatus,
 };

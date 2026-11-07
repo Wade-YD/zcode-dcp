@@ -1,6 +1,6 @@
 {
   "name": "zcode-dcp",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Dynamic Context Pruning v5 - 三级压缩提醒、压缩检测与窗口校准、会话隔离、按项目隔离的可检索归档与生命周期管理",
   "author": {
     "name": "ZCode DCP"
@@ -83,6 +83,12 @@
       "title": "启用自动计量",
       "description": "每轮读取 ZCode 模型 IO 日志计量真实 token 占用，达到阈值时自动提醒压缩",
       "default": true
+    },
+    "failure_nudge_threshold": {
+      "type": "number",
+      "title": "失败提醒阈值",
+      "description": "同一工具在会话内连续失败达到此次数时提醒归档教训（走不通的探索）；设为 0 关闭。触发后进入 15 分钟冷却，需重新积满才会再次提醒",
+      "default": 2
     },
     "debug_log": {
       "type": "boolean",

@@ -6,11 +6,13 @@
  *   session-start  会话启动/清空/内核压缩后：工具说明 + 当前占用 + 归档索引（按项目命名空间）
  *   prompt         UserPromptSubmit：计量 + 骤降压缩检测 + 分级提醒
  *   tool           PostToolUse：超大工具结果 → absorb 蒸馏提示（实验性，改写自 acp-kernel absorb.ts MIT）
+ *   failure        PostToolUseFailure：同工具连续失败达阈值 → 死胡同提醒（归档教训换路径）
  *   stop           Stop：仅计量
  *
  * 状态文件（~/.zcode/dcp/）:
  *   usage.json（全局最近活跃会话，供 server 显示，含占用趋势环 history）、nudge-<sid>.json（会话隔离提醒状态）、
- *   absorb-<sid>.json（absorb 冷却）、compact-stats.json（压缩事件+节省账本）、window-calibration.json（窗口校准）、
+ *   absorb-<sid>.json（absorb 冷却）、failure-<sid>.json（失败计数状态，达阈值触发后清零并进冷却）、
+ *   compact-stats.json（压缩事件+节省账本）、window-calibration.json（窗口校准）、
  *   blocks[-<projhash>].json（归档，project scope 时按项目哈希分文件）、dcp-debug.log（调试日志，debug_log/DCP_DEBUG 开启时）
  *
  * 任何错误都静默退出（exit 0），绝不阻塞对话。承重提示词改写自 acp-kernel (MIT, @ranxianglei)。
@@ -46,7 +48,12 @@ const DEFAULTS = {
   archive_scope: "project",
   max_blocks: 200,
   absorb_min_tool_tokens: 8000,
+  failure_nudge_threshold: 2,
 };
+
+// ---------- 死胡同提醒具名常量（不进 userConfig，仅代码内可调） ----------
+const FAILURE_STALE_MS = 30 * 60000; // 距上次失败超此值：计数衰减重计
+const FAILURE_COOLDOWN_MS = 15 * 60000; // 提醒触发后的冷却
 
 // ---------- 调试日志（debug_log 配置或 DCP_DEBUG 开启；只记元数据，严禁 prompt 文本/tool_response 内容/归档摘要/cwd） ----------
 let DBG_ENABLED = false;
@@ -85,6 +92,7 @@ function loadConfig() {
   };
   if (nonNeg("DCP_NUDGE_COOLDOWN_MINUTES") !== null) cfg.nudge_cooldown_minutes = nonNeg("DCP_NUDGE_COOLDOWN_MINUTES");
   if (nonNeg("DCP_ABSORB_MIN_TOOL_TOKENS") !== null) cfg.absorb_min_tool_tokens = nonNeg("DCP_ABSORB_MIN_TOOL_TOKENS");
+  if (nonNeg("DCP_FAILURE_NUDGE_THRESHOLD") !== null) cfg.failure_nudge_threshold = nonNeg("DCP_FAILURE_NUDGE_THRESHOLD");
   // env 优先于 config（临时开关不改配置）
   if (process.env.DCP_DEBUG === "1" || process.env.DCP_DEBUG === "true") cfg.debug_log = true;
   return cfg;
@@ -110,6 +118,8 @@ function applyConfigObject(cfg, val) {
   if (pos(val.max_blocks)) cfg.max_blocks = +val.max_blocks;
   if (Number.isFinite(+val.absorb_min_tool_tokens) && +val.absorb_min_tool_tokens >= 0)
     cfg.absorb_min_tool_tokens = +val.absorb_min_tool_tokens;
+  if (Number.isFinite(+val.failure_nudge_threshold) && +val.failure_nudge_threshold >= 0)
+    cfg.failure_nudge_threshold = +val.failure_nudge_threshold;
   // 多插件键 OR 语义：任一含 zcode-dcp 的键开了 debug_log 即生效
   if (val.debug_log === true) cfg.debug_log = true;
 }
@@ -166,6 +176,9 @@ function absorbFileFor(sid) {
 }
 function recallFileFor(sid) {
   return path.join(STATE_DIR, `recall-pending-${sanitizeSid(sid)}.json`);
+}
+function failureFileFor(sid) {
+  return path.join(STATE_DIR, `failure-${sanitizeSid(sid)}.json`);
 }
 
 // ---------- 从模型 IO 日志读取最新 usage（严格会话匹配） ----------
@@ -475,6 +488,67 @@ function maybeAbsorb(input, cfg, sessionId) {
   return true;
 }
 
+function buildFailureText(tool, count) {
+  return [
+    `[dcp] 工具 ${tool} 在本会话已连续失败 ${count} 次。`,
+    "若这是走不通的探索：请调用 compress 把教训归档（报错原文逐字保留，便于日后检索），然后换一条路径，别在原地反复尝试。",
+    "若问题可修复：继续排查即可，本提醒不会重复打扰。",
+  ].join("\n");
+}
+
+// 死胡同提醒：per-tool 计数 + 同工具成功清零（见 resetFailureCount）+ 30 分钟陈旧衰减；
+// 达阈值触发后计数归零并进 15 分钟冷却——每次提醒都要重新观测满阈值。绝不 throw。
+function maybeFailureNudge(input, cfg, sessionId) {
+  const threshold = cfg.failure_nudge_threshold;
+  if (!threshold || threshold <= 0) return;
+  const tool = String(input.tool_name || "tool");
+  try {
+    if (input.is_interrupt === true) { dlog("failure", { decision: "interrupt-skip", tool }); return; }
+    const ff = failureFileFor(sessionId);
+    const st = readJson(ff) || { tools: {} };
+    if (!st.tools || typeof st.tools !== "object") st.tools = {};
+    const prev = st.tools[tool] && typeof st.tools[tool] === "object" ? st.tools[tool] : null;
+    const now = Date.now();
+    let count = prev && Number.isFinite(prev.count) ? prev.count : 0;
+    const lastAtMs = prev && prev.lastAt ? Date.parse(prev.lastAt) : NaN;
+    if (Number.isFinite(lastAtMs) && now - lastAtMs > FAILURE_STALE_MS) count = 0; // 陈旧衰减重计
+    count += 1;
+    const lastNudgeMs = prev && prev.lastNudgeAt ? Date.parse(prev.lastNudgeAt) : NaN;
+    const lastNudgeAt = prev && prev.lastNudgeAt ? prev.lastNudgeAt : null;
+    if (count < threshold) {
+      st.tools[tool] = { count, lastAt: new Date(now).toISOString(), lastNudgeAt };
+      writeJson(ff, st);
+      dlog("failure", { decision: "count", tool, count });
+      return;
+    }
+    // 达阈值：冷却期内不提醒（计数仍归零，冷却后需重新积满）
+    if (Number.isFinite(lastNudgeMs) && now - lastNudgeMs < FAILURE_COOLDOWN_MS) {
+      st.tools[tool] = { count: 0, lastAt: new Date(now).toISOString(), lastNudgeAt };
+      writeJson(ff, st);
+      dlog("failure", { decision: "skip-cooldown", tool, count });
+      return;
+    }
+    st.tools[tool] = { count: 0, lastAt: new Date(now).toISOString(), lastNudgeAt: new Date(now).toISOString() };
+    writeJson(ff, st);
+    dlog("failure", { decision: "emit", tool, count });
+    emitAdditionalContext(buildFailureText(tool, count));
+  } catch {}
+}
+
+// 同工具成功 → 清失败计数；仅 failure 文件存在时读写（成功路径不引入写盘）。绝不 throw。
+function resetFailureCount(input, sessionId) {
+  try {
+    const ff = failureFileFor(sessionId);
+    if (!fs.existsSync(ff)) return;
+    const tool = String(input.tool_name || "tool");
+    const st = readJson(ff);
+    if (!st || !st.tools || typeof st.tools !== "object" || !st.tools[tool]) return;
+    delete st.tools[tool];
+    if (Object.keys(st.tools).length === 0) { try { fs.rmSync(ff, { force: true }); } catch {} return; }
+    writeJson(ff, st);
+  } catch {}
+}
+
 function emitAdditionalContext(text) {
   const json = JSON.stringify({ additionalContext: text });
   process.stdout.write(json + "\n");
@@ -484,8 +558,8 @@ function emitAdditionalContext(text) {
 function main(input, mode) {
   const eventName = input.hook_event_name || "";
 
-  if (!mode || mode === "stop" || !/^(session-start|prompt|stop|tool)$/.test(mode)) {
-    const byEvent = { SessionStart: "session-start", UserPromptSubmit: "prompt", Stop: "stop", PostToolUse: "tool" };
+  if (!mode || mode === "stop" || !/^(session-start|prompt|stop|tool|failure)$/.test(mode)) {
+    const byEvent = { SessionStart: "session-start", UserPromptSubmit: "prompt", Stop: "stop", PostToolUse: "tool", PostToolUseFailure: "failure" };
     mode = byEvent[eventName] || mode || "stop";
   }
 
@@ -508,7 +582,12 @@ function main(input, mode) {
   }
 
   if (mode === "tool") {
+    resetFailureCount(input, sessionId); // 成功即清失败计数（在 auto_watch 门控之外）
     if (cfg.auto_watch) maybeAbsorb(input, cfg, sessionId);
+    return;
+  }
+  if (mode === "failure") {
+    if (cfg.auto_watch) maybeFailureNudge(input, cfg, sessionId);
     return;
   }
 
